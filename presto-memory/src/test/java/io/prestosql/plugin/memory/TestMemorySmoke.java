@@ -177,6 +177,23 @@ public class TestMemorySmoke
         assertEquals(getOperatorRowsRead(runner, result.getQueryId()), ImmutableSet.of(1L, ORDERS_COUNT, PART_COUNT));
     }
 
+    @Test
+    public void testJoinDynamicFilteringSemiJoin()
+    {
+        Session session = Session
+                .builder(getSession())
+                .setSystemProperty(ENABLE_DYNAMIC_FILTERING, "true")
+                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, FeaturesConfig.JoinDistributionType.BROADCAST.name())
+                .build();
+        DistributedQueryRunner runner = (DistributedQueryRunner) getQueryRunner();
+        ResultWithQueryId<MaterializedResult> result = runner.executeWithQueryId(session, "SELECT quantity FROM lineitem " +
+                "WHERE orderkey IN (SELECT orderkey FROM orders WHERE comment = 'nstructions sleep furiously among ')");
+
+        // Probe-side is dynamically filtered:
+        assertEquals(result.getResult().getRowCount(), 6);
+        assertEquals(getOperatorRowsRead(runner, result.getQueryId()), ImmutableSet.of(6L, ORDERS_COUNT));
+    }
+
     private static Set<Long> getOperatorRowsRead(DistributedQueryRunner runner, QueryId queryId)
     {
         QueryStats stats = runner.getCoordinator().getQueryManager().getFullQueryInfo(queryId).getQueryStats();

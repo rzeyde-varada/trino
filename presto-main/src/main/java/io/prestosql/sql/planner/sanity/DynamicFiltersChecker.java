@@ -28,6 +28,7 @@ import io.prestosql.sql.planner.plan.JoinNode;
 import io.prestosql.sql.planner.plan.OutputNode;
 import io.prestosql.sql.planner.plan.PlanNode;
 import io.prestosql.sql.planner.plan.PlanVisitor;
+import io.prestosql.sql.planner.plan.SemiJoinNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.tree.Expression;
 import io.prestosql.sql.tree.SymbolReference;
@@ -91,6 +92,23 @@ public class DynamicFiltersChecker
                         .map(DynamicFilters.ExtractResult::getDynamicConjuncts)
                         .orElse(ImmutableList.of());
                 verify(nonPushedDownFilters.isEmpty(), "Dynamic filters %s present in join filter predicate were not pushed down.", nonPushedDownFilters);
+
+                Set<DynamicFilterId> unmatched = new HashSet<>(consumedBuildSide);
+                unmatched.addAll(consumedProbeSide);
+                unmatched.removeAll(currentJoinDynamicFilters);
+                return ImmutableSet.copyOf(unmatched);
+            }
+
+            @Override
+            public Set<DynamicFilterId> visitSemiJoin(SemiJoinNode node, Void context)
+            {
+                Set<DynamicFilterId> currentJoinDynamicFilters = node.getDynamicFilters().keySet();
+                Set<DynamicFilterId> consumedProbeSide = node.getSource().accept(this, context);
+                verify(difference(currentJoinDynamicFilters, consumedProbeSide).isEmpty(),
+                        "Dynamic filters present in semi-join were not fully consumed by it's probe side.");
+
+                Set<DynamicFilterId> consumedBuildSide = node.getFilteringSource().accept(this, context);
+                verify(intersection(currentJoinDynamicFilters, consumedBuildSide).isEmpty());
 
                 Set<DynamicFilterId> unmatched = new HashSet<>(consumedBuildSide);
                 unmatched.addAll(consumedProbeSide);

@@ -20,7 +20,6 @@ import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.planner.plan.DynamicFilterId;
-import io.prestosql.sql.planner.plan.JoinNode;
 import io.prestosql.sql.planner.plan.PlanNode;
 
 import java.util.ArrayList;
@@ -93,13 +92,11 @@ public class LocalDynamicFilterConsumer
         return result.getDomains().get();
     }
 
-    public static LocalDynamicFilterConsumer create(JoinNode planNode, List<Type> buildSourceTypes, int partitionCount)
+    public static LocalDynamicFilterConsumer create(PlanNode probeNode, PlanNode buildNode, Map<DynamicFilterId, Symbol> dynamicFilters, List<Type> buildSourceTypes, int partitionCount)
     {
-        checkArgument(!planNode.getDynamicFilters().isEmpty(), "Join node dynamicFilters is empty.");
-
-        PlanNode buildNode = planNode.getRight();
+        checkArgument(!dynamicFilters.isEmpty(), "Join node dynamicFilters is empty.");
         // Collect dynamic filters for all dynamic filters produced by join
-        Map<DynamicFilterId, Integer> buildChannels = planNode.getDynamicFilters().entrySet().stream()
+        Map<DynamicFilterId, Integer> buildChannels = dynamicFilters.entrySet().stream()
                 .collect(toImmutableMap(
                         // Dynamic filter ID
                         Map.Entry::getKey,

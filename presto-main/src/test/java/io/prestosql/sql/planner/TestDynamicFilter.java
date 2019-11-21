@@ -157,6 +157,20 @@ public class TestDynamicFilter
     }
 
     @Test
+    public void testSemiJoin()
+    {
+        assertPlan("SELECT comment FROM orders WHERE orderkey IN (SELECT orderkey FROM lineitem WHERE linenumber % 4 = 0)",
+                anyTree(
+                        filter("S",
+                                project(
+                                        semiJoin("X", "Y", "S",
+                                                anyTree(
+                                                        tableScan("orders", ImmutableMap.of("X", "orderkey"))),
+                                                anyTree(
+                                                        tableScan("lineitem", ImmutableMap.of("Y", "orderkey"))))))));
+    }
+
+    @Test
     public void testUncorrelatedSubqueries()
     {
         assertPlan("SELECT * FROM orders WHERE orderkey = (SELECT orderkey FROM lineitem ORDER BY orderkey LIMIT 1)",

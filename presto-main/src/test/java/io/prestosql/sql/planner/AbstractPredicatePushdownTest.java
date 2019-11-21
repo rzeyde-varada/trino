@@ -121,6 +121,7 @@ public abstract class AbstractPredicatePushdownTest
     public void testNonDeterministicPredicateDoesNotPropagateFromFilteringSideToSourceSideOfSemiJoin()
     {
         assertPlan("SELECT * FROM lineitem WHERE orderkey IN (SELECT orderkey FROM orders WHERE orderkey = random(5))",
+                Session.builder(getQueryRunner().getDefaultSession()).setSystemProperty(ENABLE_DYNAMIC_FILTERING, "false").build(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT",
                                 // NO filter here

@@ -16,6 +16,7 @@ package io.prestosql.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.MoreCollectors;
 import com.google.common.collect.Sets;
 import io.prestosql.Session;
 import io.prestosql.execution.warnings.WarningCollector;
@@ -497,7 +498,9 @@ public class PredicatePushDown
                 }
             }
 
-            DynamicFiltersResult dynamicFiltersResult = createDynamicFilters(node, equiJoinClauses, session, idAllocator);
+            DynamicFiltersResult dynamicFiltersResult = node.getType() == INNER ?
+                    createDynamicFilters(node.getDynamicFilters(), equiJoinClauses, session, idAllocator) :
+                    DynamicFiltersResult.empty();
             Map<DynamicFilterId, Symbol> dynamicFilters = dynamicFiltersResult.getDynamicFilters();
             leftPredicate = combineConjuncts(metadata, leftPredicate, combineConjuncts(metadata, dynamicFiltersResult.getPredicates()));
 
@@ -568,11 +571,11 @@ public class PredicatePushDown
             return output;
         }
 
-        private DynamicFiltersResult createDynamicFilters(JoinNode node, List<JoinNode.EquiJoinClause> equiJoinClauses, Session session, PlanNodeIdAllocator idAllocator)
+        private DynamicFiltersResult createDynamicFilters(Map<DynamicFilterId, Symbol> existingDynamicFilters, List<JoinNode.EquiJoinClause> equiJoinClauses, Session session, PlanNodeIdAllocator idAllocator)
         {
             Map<DynamicFilterId, Symbol> dynamicFilters = ImmutableMap.of();
             List<Expression> predicates = ImmutableList.of();
-            if (node.getType() == INNER && isEnableDynamicFiltering(session) && dynamicFiltering) {
+            if (isEnableDynamicFiltering(session) && dynamicFiltering) {
                 // New equiJoinClauses could potentially not contain symbols used in current dynamic filters.
                 // Since we use PredicatePushdown to push dynamic filters themselves,
                 // instead of separate ApplyDynamicFilters rule we derive dynamic filters within PredicatePushdown itself.
@@ -580,7 +583,7 @@ public class PredicatePushDown
                 ImmutableMap.Builder<DynamicFilterId, Symbol> dynamicFiltersBuilder = ImmutableMap.builder();
                 ImmutableList.Builder<Expression> predicatesBuilder = ImmutableList.builder();
                 // reuse existing dynamic filters to make planning more stable
-                Map<Symbol, DynamicFilterId> buildSymbolToDynamicFilter = new HashMap<>(node.getDynamicFilters().entrySet().stream()
+                Map<Symbol, DynamicFilterId> buildSymbolToDynamicFilter = new HashMap<>(existingDynamicFilters.entrySet().stream()
                         .collect(toImmutableMap(Map.Entry::getValue, Map.Entry::getKey)));
                 for (JoinNode.EquiJoinClause clause : equiJoinClauses) {
                     Symbol probeSymbol = clause.getLeft();
@@ -606,6 +609,11 @@ public class PredicatePushDown
             {
                 this.dynamicFilters = dynamicFilters;
                 this.predicates = predicates;
+            }
+
+            public static DynamicFiltersResult empty()
+            {
+                return new DynamicFiltersResult(ImmutableMap.of(), ImmutableList.of());
             }
 
             public Map<DynamicFilterId, Symbol> getDynamicFilters()
@@ -1186,7 +1194,8 @@ public class PredicatePushDown
 
             PlanNode output = node;
             if (rewrittenSource != node.getSource() || rewrittenFilteringSource != node.getFilteringSource()) {
-                output = new SemiJoinNode(node.getId(), rewrittenSource, rewrittenFilteringSource, node.getSourceJoinSymbol(), node.getFilteringSourceJoinSymbol(), node.getSemiJoinOutput(), node.getSourceHashSymbol(), node.getFilteringSourceHashSymbol(), node.getDistributionType());
+                // TODO: can we add dynamic filtering here as well?
+                output = new SemiJoinNode(node.getId(), rewrittenSource, rewrittenFilteringSource, node.getSourceJoinSymbol(), node.getFilteringSourceJoinSymbol(), node.getSemiJoinOutput(), node.getSourceHashSymbol(), node.getFilteringSourceHashSymbol(), node.getDistributionType(), node.getDynamicFilter());
             }
             if (!postJoinConjuncts.isEmpty()) {
                 output = new FilterNode(idAllocator.getNextId(), output, combineConjuncts(metadata, postJoinConjuncts));
@@ -1262,11 +1271,26 @@ public class PredicatePushDown
             sourceConjuncts.addAll(allInferenceWithoutSourceInferred.generateEqualitiesPartitionedBy(sourceScope).getScopeEqualities());
             filteringSourceConjuncts.addAll(allInferenceWithoutFilteringSourceInferred.generateEqualitiesPartitionedBy(filterScope).getScopeEqualities());
 
-            PlanNode rewrittenSource = context.rewrite(node.getSource(), combineConjuncts(metadata, sourceConjuncts));
+            // Get dynamic filter, if exists.
+            JoinNode.EquiJoinClause clause = new JoinNode.EquiJoinClause(node.getSourceJoinSymbol(), node.getFilteringSourceJoinSymbol());
+            DynamicFiltersResult dynamicFiltersResult = createDynamicFilters(node.getDynamicFilters(), ImmutableList.of(clause), session, idAllocator);
+            Optional<DynamicFilterId> dynamicFilter = dynamicFiltersResult
+                    .getDynamicFilters()
+                    .keySet().stream()
+                    .collect(MoreCollectors.toOptional());
+
+            PlanNode rewrittenSource = context.rewrite(
+                    node.getSource(),
+                    combineConjuncts(
+                            metadata,
+                            combineConjuncts(metadata, sourceConjuncts),
+                            combineConjuncts(metadata, dynamicFiltersResult.getPredicates())));
             PlanNode rewrittenFilteringSource = context.rewrite(node.getFilteringSource(), combineConjuncts(metadata, filteringSourceConjuncts));
 
             PlanNode output = node;
-            if (rewrittenSource != node.getSource() || rewrittenFilteringSource != node.getFilteringSource()) {
+            if (rewrittenSource != node.getSource() ||
+                    rewrittenFilteringSource != node.getFilteringSource() ||
+                    !dynamicFilter.equals(node.getDynamicFilter())) {
                 output = new SemiJoinNode(
                         node.getId(),
                         rewrittenSource,
@@ -1276,7 +1300,8 @@ public class PredicatePushDown
                         node.getSemiJoinOutput(),
                         node.getSourceHashSymbol(),
                         node.getFilteringSourceHashSymbol(),
-                        node.getDistributionType());
+                        node.getDistributionType(),
+                        dynamicFilter);
             }
             if (!postJoinConjuncts.isEmpty()) {
                 output = new FilterNode(idAllocator.getNextId(), output, combineConjuncts(metadata, postJoinConjuncts));

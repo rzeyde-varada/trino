@@ -57,7 +57,7 @@ public class JoinNode
     private final Optional<Symbol> rightHashSymbol;
     private final Optional<DistributionType> distributionType;
     private final Optional<Boolean> spillable;
-    private final Map<DynamicFilterId, Symbol> dynamicFilters;
+    private final Map<DynamicFilterId, Symbol> dynamicFilters;  // mapping dynamic filter ID to its build-side symbol
 
     // stats and cost used for join reordering
     private final Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost;

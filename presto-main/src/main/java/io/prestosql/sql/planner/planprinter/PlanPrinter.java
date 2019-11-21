@@ -452,6 +452,10 @@ public class PlanPrinter
             node.getSource().accept(this, context);
             node.getFilteringSource().accept(this, context);
 
+            if (!node.getDynamicFilters().isEmpty()) {
+                nodeOutput.appendDetails("dynamicFilterAssignments = %s", printDynamicFilterAssignments(node.getDynamicFilters()));
+            }
+
             return null;
         }
 

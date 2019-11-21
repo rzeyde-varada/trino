@@ -16,11 +16,13 @@ package io.prestosql.sql.planner.plan;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.prestosql.sql.planner.Symbol;
 
 import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -38,6 +40,7 @@ public class SemiJoinNode
     private final Optional<Symbol> sourceHashSymbol;
     private final Optional<Symbol> filteringSourceHashSymbol;
     private final Optional<DistributionType> distributionType;
+    private final Optional<DynamicFilterId> dynamicFilter;
 
     @JsonCreator
     public SemiJoinNode(@JsonProperty("id") PlanNodeId id,
@@ -48,7 +51,8 @@ public class SemiJoinNode
             @JsonProperty("semiJoinOutput") Symbol semiJoinOutput,
             @JsonProperty("sourceHashSymbol") Optional<Symbol> sourceHashSymbol,
             @JsonProperty("filteringSourceHashSymbol") Optional<Symbol> filteringSourceHashSymbol,
-            @JsonProperty("distributionType") Optional<DistributionType> distributionType)
+            @JsonProperty("distributionType") Optional<DistributionType> distributionType,
+            @JsonProperty("dynamicFilter") Optional<DynamicFilterId> dynamicFilter)
     {
         super(id);
         this.source = requireNonNull(source, "source is null");
@@ -59,6 +63,7 @@ public class SemiJoinNode
         this.sourceHashSymbol = requireNonNull(sourceHashSymbol, "sourceHashSymbol is null");
         this.filteringSourceHashSymbol = requireNonNull(filteringSourceHashSymbol, "filteringSourceHashSymbol is null");
         this.distributionType = requireNonNull(distributionType, "distributionType is null");
+        this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
 
         checkArgument(source.getOutputSymbols().contains(sourceJoinSymbol), "Source does not contain join symbol");
         checkArgument(filteringSource.getOutputSymbols().contains(filteringSourceJoinSymbol), "Filtering source does not contain filtering join symbol");
@@ -118,6 +123,19 @@ public class SemiJoinNode
         return distributionType;
     }
 
+    @JsonProperty("dynamicFilter")
+    public Optional<DynamicFilterId> getDynamicFilter()
+    {
+        return dynamicFilter;
+    }
+
+    public Map<DynamicFilterId, Symbol> getDynamicFilters()
+    {
+        return dynamicFilter
+                .map(filterId -> ImmutableMap.of(filterId, filteringSourceJoinSymbol))
+                .orElse(ImmutableMap.of());
+    }
+
     @Override
     public List<PlanNode> getSources()
     {
@@ -152,7 +170,8 @@ public class SemiJoinNode
                 semiJoinOutput,
                 sourceHashSymbol,
                 filteringSourceHashSymbol,
-                distributionType);
+                distributionType,
+                dynamicFilter);
     }
 
     public SemiJoinNode withDistributionType(DistributionType distributionType)
@@ -166,6 +185,7 @@ public class SemiJoinNode
                 semiJoinOutput,
                 sourceHashSymbol,
                 filteringSourceHashSymbol,
-                Optional.of(distributionType));
+                Optional.of(distributionType),
+                dynamicFilter);
     }
 }

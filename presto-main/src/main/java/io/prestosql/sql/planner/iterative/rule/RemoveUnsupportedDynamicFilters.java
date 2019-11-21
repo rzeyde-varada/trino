@@ -15,6 +15,7 @@ package io.prestosql.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.MoreCollectors;
 import io.prestosql.Session;
 import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
@@ -29,6 +30,7 @@ import io.prestosql.sql.planner.plan.FilterNode;
 import io.prestosql.sql.planner.plan.JoinNode;
 import io.prestosql.sql.planner.plan.PlanNode;
 import io.prestosql.sql.planner.plan.PlanVisitor;
+import io.prestosql.sql.planner.plan.SemiJoinNode;
 import io.prestosql.sql.planner.plan.SpatialJoinNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.tree.Expression;
@@ -42,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -100,6 +103,44 @@ public class RemoveUnsupportedDynamicFilters
                     .collect(toImmutableSet());
 
             return new PlanWithConsumedDynamicFilters(result, consumedDynamicFilterIds);
+        }
+
+        @Override
+        public PlanWithConsumedDynamicFilters visitSemiJoin(SemiJoinNode node, Set<DynamicFilterId> allowedDynamicFilterIds)
+        {
+            ImmutableSet<DynamicFilterId> allowedDynamicFilterIdsProbeSide = ImmutableSet.<DynamicFilterId>builder()
+                    .addAll(node.getDynamicFilters().keySet())
+                    .addAll(allowedDynamicFilterIds)
+                    .build();
+
+            PlanWithConsumedDynamicFilters leftResult = node.getSource().accept(this, allowedDynamicFilterIdsProbeSide);
+            Set<DynamicFilterId> consumedProbeSide = leftResult.getConsumedDynamicFilterIds();
+            Map<DynamicFilterId, Symbol> dynamicFilters = node.getDynamicFilters().entrySet().stream()
+                    .filter(entry -> consumedProbeSide.contains(entry.getKey()))
+                    .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+            PlanWithConsumedDynamicFilters rightResult = node.getFilteringSource().accept(this, allowedDynamicFilterIds);
+            Set<DynamicFilterId> consumed = new HashSet<>(rightResult.getConsumedDynamicFilterIds());
+            consumed.addAll(consumedProbeSide);
+            consumed.removeAll(dynamicFilters.keySet());
+
+            PlanNode left = leftResult.getNode();
+            PlanNode right = rightResult.getNode();
+            if (!left.equals(node.getSource()) || !right.equals(node.getFilteringSource()) || !dynamicFilters.equals(node.getDynamicFilters())) {
+                return new PlanWithConsumedDynamicFilters(new SemiJoinNode(
+                        node.getId(),
+                        left,
+                        right,
+                        node.getSourceJoinSymbol(),
+                        node.getFilteringSourceJoinSymbol(),
+                        node.getSemiJoinOutput(),
+                        node.getSourceHashSymbol(),
+                        node.getFilteringSourceHashSymbol(),
+                        node.getDistributionType(),
+                        dynamicFilters.keySet().stream().collect(MoreCollectors.toOptional())),
+                        ImmutableSet.copyOf(consumed));
+            }
+            return new PlanWithConsumedDynamicFilters(node, ImmutableSet.copyOf(consumed));
         }
 
         @Override
