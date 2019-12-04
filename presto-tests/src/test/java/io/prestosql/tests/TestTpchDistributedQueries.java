@@ -40,6 +40,12 @@ public class TestTpchDistributedQueries
     }
 
     @Test
+    public void testSelect1()
+    {
+        assertQuery("SELECT 1");
+    }
+
+    @Test
     public void testIOExplain()
     {
         String query = "SELECT * FROM orders";
