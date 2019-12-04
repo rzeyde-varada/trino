@@ -81,6 +81,7 @@ import static java.net.HttpURLConnection.HTTP_UNAUTHORIZED;
 import static java.net.HttpURLConnection.HTTP_UNAVAILABLE;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 @ThreadSafe
 class StatementClientV1
@@ -342,6 +343,12 @@ class StatementClientV1
             return false;
         }
 
+        try {
+            SECONDS.sleep(3);
+        }
+        catch (InterruptedException e) {
+            e.printStackTrace();
+        }
         URI nextUri = currentStatusInfo().getNextUri();
         if (nextUri == null) {
             state.compareAndSet(State.RUNNING, State.FINISHED);
