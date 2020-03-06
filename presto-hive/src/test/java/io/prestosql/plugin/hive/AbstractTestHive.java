@@ -926,6 +926,39 @@ public abstract class AbstractTestHive
     }
 
     @Test
+    public void testGood()
+    {
+        try (Transaction transaction = newTransaction()) {
+            ConnectorMetadata metadata = transaction.getMetadata();
+
+            ConnectorSession first = newSession();
+            metadata.beginQuery(first);
+            metadata.cleanupQuery(first);
+
+            ConnectorSession second = newSession();
+            metadata.beginQuery(second);
+            metadata.cleanupQuery(second);
+        }
+    }
+
+    @Test
+    public void testBad()
+    {
+        try (Transaction transaction = newTransaction()) {
+            ConnectorMetadata metadata = transaction.getMetadata();
+
+            ConnectorSession first = newSession();
+            ConnectorSession second = newSession();
+
+            metadata.beginQuery(first);
+            metadata.beginQuery(second);
+
+            metadata.cleanupQuery(first);
+            metadata.cleanupQuery(second);
+        }
+    }
+
+    @Test
     public void testGetDatabaseNames()
     {
         try (Transaction transaction = newTransaction()) {
