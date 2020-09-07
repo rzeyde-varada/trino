@@ -13,6 +13,7 @@
  */
 package io.prestosql.spi.connector;
 
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.predicate.TupleDomain;
 
 import java.util.List;
@@ -66,5 +67,22 @@ public interface ConnectorPageSourceProvider
     {
         // By default, poll dynamic filtering without blocking for collection to complete.
         return createPageSource(transaction, session, split, table, columns, dynamicFilter.getCurrentPredicate());
+    }
+
+    /**
+     * @param columns columns that should show up in the output page, in this order
+     * @param dynamicFilter optionally remove rows that don't satisfy this predicate
+     * @param rowFilter - optionally skip rows
+     */
+    default ConnectorPageSource createPageSource(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle table,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter,
+            RowFilter rowFilter)
+    {
+        throw new UnsupportedOperationException("createPageSource(..., RowFilter) must be implemented");
     }
 }

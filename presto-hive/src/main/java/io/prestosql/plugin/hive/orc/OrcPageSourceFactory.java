@@ -39,6 +39,7 @@ import io.prestosql.plugin.hive.acid.AcidSchema;
 import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.orc.OrcPageSource.ColumnAdaptation;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.EmptyPageSource;
@@ -149,6 +150,26 @@ public class OrcPageSourceFactory
             boolean originalFile,
             AcidTransaction transaction)
     {
+        return createPageSource(configuration, session, path, start, length, estimatedFileSize, schema, columns, effectivePredicate, acidInfo, bucketNumber, originalFile, transaction, RowFilter.ALL_ROWS);
+    }
+
+    @Override
+    public Optional<ReaderPageSource> createPageSource(
+            Configuration configuration,
+            ConnectorSession session,
+            Path path,
+            long start,
+            long length,
+            long estimatedFileSize,
+            Properties schema,
+            List<HiveColumnHandle> columns,
+            TupleDomain<HiveColumnHandle> effectivePredicate,
+            Optional<AcidInfo> acidInfo,
+            OptionalInt bucketNumber,
+            boolean originalFile,
+            AcidTransaction transaction,
+            RowFilter rowFilter)
+    {
         if (!isDeserializerClass(schema, OrcSerde.class)) {
             return Optional.empty();
         }
@@ -195,6 +216,7 @@ public class OrcPageSourceFactory
                 bucketNumber,
                 originalFile,
                 transaction,
+                rowFilter,
                 stats);
 
         return Optional.of(new ReaderPageSource(orcPageSource, readerColumns));
@@ -219,6 +241,7 @@ public class OrcPageSourceFactory
             OptionalInt bucketNumber,
             boolean originalFile,
             AcidTransaction transaction,
+            RowFilter rowFilter,
             FileFormatDataSourceStats stats)
     {
         for (HiveColumnHandle column : columns) {
@@ -361,6 +384,7 @@ public class OrcPageSourceFactory
                     fileReadTypes,
                     fileReadLayouts,
                     predicateBuilder.build(),
+                    rowFilter,
                     start,
                     length,
                     legacyFileTimeZone,

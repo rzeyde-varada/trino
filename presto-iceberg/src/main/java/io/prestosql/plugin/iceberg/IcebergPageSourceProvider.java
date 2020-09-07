@@ -33,6 +33,7 @@ import io.prestosql.parquet.ParquetReaderOptions;
 import io.prestosql.parquet.RichColumnDescriptor;
 import io.prestosql.parquet.predicate.Predicate;
 import io.prestosql.parquet.reader.MetadataReader;
+import io.prestosql.parquet.reader.ParquetBlockMetaData;
 import io.prestosql.parquet.reader.ParquetReader;
 import io.prestosql.plugin.hive.FileFormatDataSourceStats;
 import io.prestosql.plugin.hive.HdfsEnvironment;
@@ -45,6 +46,7 @@ import io.prestosql.plugin.hive.parquet.HdfsParquetDataSource;
 import io.prestosql.plugin.hive.parquet.ParquetPageSource;
 import io.prestosql.plugin.hive.parquet.ParquetReaderConfig;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.connector.ConnectorPageSourceProvider;
@@ -52,6 +54,7 @@ import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplit;
 import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.type.StandardTypes;
@@ -137,10 +140,23 @@ public class IcebergPageSourceProvider
     public ConnectorPageSource createPageSource(
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle table,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter)
+    {
+        return createPageSource(transaction, session, split, table, columns, dynamicFilter, RowFilter.ALL_ROWS);
+    }
+
+    @Override
+    public ConnectorPageSource createPageSource(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
             ConnectorSplit connectorSplit,
             ConnectorTableHandle connectorTable,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter,
+            RowFilter rowFilter)
     {
         IcebergSplit split = (IcebergSplit) connectorSplit;
         IcebergTableHandle table = (IcebergTableHandle) connectorTable;
@@ -166,7 +182,8 @@ public class IcebergPageSourceProvider
                 split.getFileSize(),
                 split.getFileFormat(),
                 regularColumns,
-                table.getUnenforcedPredicate());
+                table.getUnenforcedPredicate(),
+                rowFilter);
 
         return new IcebergPageSource(icebergColumns, partitionKeys, dataPageSource, session.getTimeZoneKey());
     }
@@ -180,7 +197,8 @@ public class IcebergPageSourceProvider
             long fileSize,
             FileFormat fileFormat,
             List<IcebergColumnHandle> dataColumns,
-            TupleDomain<IcebergColumnHandle> predicate)
+            TupleDomain<IcebergColumnHandle> predicate,
+            RowFilter rowFilter)
     {
         switch (fileFormat) {
             case ORC:
@@ -194,6 +212,7 @@ public class IcebergPageSourceProvider
                         fileSize,
                         dataColumns,
                         predicate,
+                        rowFilter,
                         orcReaderOptions
                                 .withMaxMergeDistance(getOrcMaxMergeDistance(session))
                                 .withMaxBufferSize(getOrcMaxBufferSize(session))
@@ -217,6 +236,7 @@ public class IcebergPageSourceProvider
                         parquetReaderOptions
                                 .withMaxReadBlockSize(getParquetMaxReadBlockSize(session)),
                         predicate,
+                        rowFilter,
                         fileFormatDataSourceStats);
         }
         throw new PrestoException(NOT_SUPPORTED, "File format not supported for Iceberg: " + fileFormat);
@@ -232,6 +252,7 @@ public class IcebergPageSourceProvider
             long fileSize,
             List<IcebergColumnHandle> columns,
             TupleDomain<IcebergColumnHandle> effectivePredicate,
+            RowFilter rowFilter,
             OrcReaderOptions options,
             FileFormatDataSourceStats stats)
     {
@@ -297,6 +318,7 @@ public class IcebergPageSourceProvider
                     fileReadColumns,
                     fileReadTypes,
                     predicateBuilder.build(),
+                    rowFilter,
                     start,
                     length,
                     UTC,
@@ -343,6 +365,7 @@ public class IcebergPageSourceProvider
             List<IcebergColumnHandle> regularColumns,
             ParquetReaderOptions options,
             TupleDomain<IcebergColumnHandle> effectivePredicate,
+            RowFilter rowFilter,
             FileFormatDataSourceStats fileFormatDataSourceStats)
     {
         AggregatedMemoryContext systemMemoryContext = newSimpleAggregatedMemoryContext();
@@ -377,13 +400,15 @@ public class IcebergPageSourceProvider
             TupleDomain<ColumnDescriptor> parquetTupleDomain = getParquetTupleDomain(descriptorsByPath, effectivePredicate);
             Predicate parquetPredicate = buildPredicate(requestedSchema, parquetTupleDomain, descriptorsByPath, UTC);
 
-            List<BlockMetaData> blocks = new ArrayList<>();
+            List<ParquetBlockMetaData> blocks = new ArrayList<>();
+            long rowOffset = 0;
             for (BlockMetaData block : parquetMetadata.getBlocks()) {
                 long firstDataPage = block.getColumns().get(0).getFirstDataPageOffset();
                 if ((firstDataPage >= start) && (firstDataPage < (start + length)) &&
                         predicateMatches(parquetPredicate, block, dataSource, descriptorsByPath, parquetTupleDomain)) {
-                    blocks.add(block);
+                    blocks.add(new ParquetBlockMetaData(block, rowOffset));
                 }
+                rowOffset += block.getRowCount();
             }
 
             MessageColumnIO messageColumnIO = getColumnIO(fileSchema, requestedSchema);
@@ -414,7 +439,7 @@ public class IcebergPageSourceProvider
                 }
             }
 
-            return new ParquetPageSource(parquetReader, prestoTypes.build(), internalFields.build());
+            return new ParquetPageSource(parquetReader, prestoTypes.build(), internalFields.build(), rowFilter);
         }
         catch (IOException | RuntimeException e) {
             try {

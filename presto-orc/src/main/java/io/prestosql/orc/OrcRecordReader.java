@@ -38,6 +38,7 @@ import io.prestosql.orc.metadata.statistics.StripeStatistics;
 import io.prestosql.orc.reader.ColumnReader;
 import io.prestosql.orc.stream.InputStreamSources;
 import io.prestosql.spi.Page;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.type.Type;
 import org.joda.time.DateTimeZone;
@@ -64,6 +65,7 @@ import static io.prestosql.orc.OrcReader.MAX_BATCH_SIZE;
 import static io.prestosql.orc.OrcRecordReader.LinearProbeRangeFinder.createTinyStripesRangeFinder;
 import static io.prestosql.orc.OrcWriteValidation.WriteChecksumBuilder.createWriteChecksumBuilder;
 import static io.prestosql.orc.reader.ColumnReaders.createColumnReader;
+import static io.prestosql.spi.RowFilter.rowRange;
 import static io.prestosql.spi.block.LazyBlock.listenForLoads;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -77,6 +79,7 @@ public class OrcRecordReader
     private static final int INSTANCE_SIZE = ClassLayout.parseClass(OrcRecordReader.class).instanceSize();
 
     private final OrcDataSource orcDataSource;
+    private final RowFilter rowFilter;
 
     private final ColumnReader[] columnReaders;
     private final long[] currentBytesPerCell;
@@ -125,6 +128,7 @@ public class OrcRecordReader
             List<Type> readTypes,
             List<OrcReader.ProjectedLayout> readLayouts,
             OrcPredicate predicate,
+            RowFilter rowFilter,
             long numberOfRows,
             List<StripeInformation> fileStripes,
             Optional<ColumnMetadata<ColumnStatistics>> fileStats,
@@ -163,6 +167,7 @@ public class OrcRecordReader
         requireNonNull(systemMemoryUsage, "systemMemoryUsage is null");
         requireNonNull(exceptionTransform, "exceptionTransform is null");
 
+        this.rowFilter = requireNonNull(rowFilter, "rowFilter is null");
         this.writeValidation = requireNonNull(writeValidation, "writeValidation is null");
         this.writeChecksumBuilder = writeValidation.map(validation -> createWriteChecksumBuilder(orcTypes, readTypes));
         this.rowGroupStatisticsValidation = writeValidation.map(validation -> validation.createWriteStatisticsBuilder(orcTypes, readTypes));
@@ -194,13 +199,24 @@ public class OrcRecordReader
             // select stripes that start within the specified split
             for (StripeInfo info : stripeInfos) {
                 StripeInformation stripe = info.getStripe();
-                if (splitContainsStripe(splitOffset, splitLength, stripe) && isStripeIncluded(stripe, info.getStats(), predicate)) {
-                    stripes.add(stripe);
-                    stripeFilePositions.add(fileRowCount);
-                    totalRowCount += stripe.getNumberOfRows();
+                if (splitContainsStripe(splitOffset, splitLength, stripe)) {
+                    // check if stripe can be skipped using predicate pushdown
+                    if (isStripeIncluded(stripe, info.getStats(), predicate)) {
+                        if (this.rowFilter.shouldCollectRange(fileRowCount, stripe.getNumberOfRows())) {
+                            stripes.add(stripe);
+                            stripeFilePositions.add(fileRowCount);
+                            totalRowCount += stripe.getNumberOfRows();
+                        }
+                    }
+                    else {
+                        this.rowFilter.skipRows(rowRange(fileRowCount, stripe.getNumberOfRows()));
+                    }
                 }
                 fileRowCount += stripe.getNumberOfRows();
             }
+        }
+        else {
+            this.rowFilter.skipRows(rowRange(0, numberOfRows));
         }
         this.totalRowCount = totalRowCount;
         this.stripes = stripes.build();
@@ -235,6 +251,7 @@ public class OrcRecordReader
                 ImmutableSet.copyOf(readColumns),
                 rowsInRowGroup,
                 predicate,
+                this.rowFilter,
                 hiveWriterVersion,
                 metadataReader,
                 writeValidation);
@@ -275,6 +292,11 @@ public class OrcRecordReader
             }
         }
         return new CachingOrcDataSource(dataSource, createTinyStripesRangeFinder(stripes, maxMergeDistance, tinyStripeThreshold));
+    }
+
+    public RowFilter getRowFilter()
+    {
+        return rowFilter;
     }
 
     /**
@@ -394,7 +416,6 @@ public class OrcRecordReader
         currentBatchSize = min(nextBatchSize, maxBatchSize);
         nextBatchSize = min(currentBatchSize * BATCH_SIZE_GROWTH_FACTOR, MAX_BATCH_SIZE);
         currentBatchSize = toIntExact(min(currentBatchSize, currentGroupRowCount - nextRowInGroup));
-
         for (ColumnReader column : columnReaders) {
             if (column != null) {
                 column.prepareNextRead(currentBatchSize);
@@ -512,7 +533,7 @@ public class OrcRecordReader
         StripeInformation stripeInformation = stripes.get(currentStripe);
         validateWriteStripe(stripeInformation.getNumberOfRows());
 
-        Stripe stripe = stripeReader.readStripe(stripeInformation, currentStripeSystemMemoryContext);
+        Stripe stripe = stripeReader.readStripe(stripeFilePositions.get(currentStripe), stripeInformation, currentStripeSystemMemoryContext);
         if (stripe != null) {
             // Give readers access to dictionary streams
             InputStreamSources dictionaryStreamSources = stripe.getDictionaryStreamSources();

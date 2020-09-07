@@ -25,6 +25,7 @@ import io.prestosql.plugin.hive.coercions.VarcharToIntegerNumberCoercer;
 import io.prestosql.plugin.hive.util.HiveBucketing.BucketingVersion;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.block.ArrayBlock;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.block.ColumnarArray;
@@ -265,6 +266,12 @@ public class HivePageSource
     public boolean isFinished()
     {
         return delegate.isFinished();
+    }
+
+    @Override
+    public RowFilter getRowFilter()
+    {
+        return delegate.getRowFilter();
     }
 
     @Override
@@ -702,5 +709,11 @@ public class HivePageSource
                     typeManager,
                     delegate);
         }
+    }
+
+    @Override
+    public boolean supportsRowFiltering()
+    {
+        return delegate.supportsRowFiltering();
     }
 }

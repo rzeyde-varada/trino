@@ -13,6 +13,7 @@
  */
 package io.prestosql.plugin.base.classloader;
 
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.classloader.ThreadContextClassLoader;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
@@ -64,6 +65,14 @@ public class ClassLoaderSafeConnectorPageSourceProvider
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             return delegate.createPageSource(transaction, session, split, table, columns, dynamicFilter);
+        }
+    }
+
+    @Override
+    public ConnectorPageSource createPageSource(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorSplit split, ConnectorTableHandle table, List<ColumnHandle> columns, DynamicFilter dynamicFilter, RowFilter rowFilter)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.createPageSource(transaction, session, split, table, columns, dynamicFilter, rowFilter);
         }
     }
 }

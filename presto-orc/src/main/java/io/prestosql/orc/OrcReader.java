@@ -34,6 +34,7 @@ import io.prestosql.orc.metadata.PostScript.HiveWriterVersion;
 import io.prestosql.orc.stream.OrcChunkLoader;
 import io.prestosql.orc.stream.OrcInputStream;
 import io.prestosql.spi.Page;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.type.Type;
 import org.joda.time.DateTimeZone;
 
@@ -262,6 +263,7 @@ public class OrcReader
                 readColumns,
                 readTypes,
                 predicate,
+                RowFilter.ALL_ROWS,
                 0,
                 orcDataSource.getEstimatedSize(),
                 legacyFileTimeZone,
@@ -274,6 +276,7 @@ public class OrcReader
             List<OrcColumn> readColumns,
             List<Type> readTypes,
             OrcPredicate predicate,
+            RowFilter rowFilter,
             long offset,
             long length,
             DateTimeZone legacyFileTimeZone,
@@ -287,6 +290,7 @@ public class OrcReader
                 readTypes,
                 Collections.nCopies(readColumns.size(), ProjectedLayout.fullyProjectedLayout()),
                 predicate,
+                rowFilter,
                 offset,
                 length,
                 legacyFileTimeZone,
@@ -300,6 +304,7 @@ public class OrcReader
             List<Type> readTypes,
             List<ProjectedLayout> readLayouts,
             OrcPredicate predicate,
+            RowFilter rowFilter,
             long offset,
             long length,
             DateTimeZone legacyFileTimeZone,
@@ -313,6 +318,7 @@ public class OrcReader
                 requireNonNull(readTypes, "readTypes is null"),
                 requireNonNull(readLayouts, "readLayouts is null"),
                 requireNonNull(predicate, "predicate is null"),
+                requireNonNull(rowFilter, "rowFilter is null"),
                 footer.getNumberOfRows(),
                 footer.getStripes(),
                 footer.getFileStats(),

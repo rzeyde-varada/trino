@@ -27,6 +27,7 @@ import io.prestosql.plugin.hive.FileFormatDataSourceStats;
 import io.prestosql.plugin.hive.HdfsEnvironment;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -145,6 +146,7 @@ public class OrcDeleteDeltaPageSource
                 rowIdColumns,
                 ImmutableList.of(BIGINT, BIGINT),
                 OrcPredicate.TRUE,
+                RowFilter.ALL_ROWS,
                 0,
                 fileSize,
                 UTC,

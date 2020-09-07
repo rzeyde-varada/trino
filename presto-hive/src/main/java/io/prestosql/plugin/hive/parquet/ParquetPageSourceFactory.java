@@ -24,6 +24,7 @@ import io.prestosql.parquet.ParquetReaderOptions;
 import io.prestosql.parquet.RichColumnDescriptor;
 import io.prestosql.parquet.predicate.Predicate;
 import io.prestosql.parquet.reader.MetadataReader;
+import io.prestosql.parquet.reader.ParquetBlockMetaData;
 import io.prestosql.parquet.reader.ParquetReader;
 import io.prestosql.plugin.hive.AcidInfo;
 import io.prestosql.plugin.hive.FileFormatDataSourceStats;
@@ -35,6 +36,7 @@ import io.prestosql.plugin.hive.ReaderColumns;
 import io.prestosql.plugin.hive.ReaderPageSource;
 import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.predicate.Domain;
@@ -87,6 +89,7 @@ import static io.prestosql.plugin.hive.HiveSessionProperties.isParquetIgnoreStat
 import static io.prestosql.plugin.hive.HiveSessionProperties.isUseParquetColumnNames;
 import static io.prestosql.plugin.hive.parquet.ParquetColumnIOConverter.constructField;
 import static io.prestosql.plugin.hive.util.HiveUtil.getDeserializerClassName;
+import static io.prestosql.spi.RowFilter.rowRange;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableList;
@@ -132,6 +135,26 @@ public class ParquetPageSourceFactory
             boolean originalFile,
             AcidTransaction transaction)
     {
+        return createPageSource(configuration, session, path, start, length, estimatedFileSize, schema, columns, effectivePredicate, acidInfo, bucketNumber, originalFile, transaction, RowFilter.ALL_ROWS);
+    }
+
+    @Override
+    public Optional<ReaderPageSource> createPageSource(
+            Configuration configuration,
+            ConnectorSession session,
+            Path path,
+            long start,
+            long length,
+            long estimatedFileSize,
+            Properties schema,
+            List<HiveColumnHandle> columns,
+            TupleDomain<HiveColumnHandle> effectivePredicate,
+            Optional<AcidInfo> acidInfo,
+            OptionalInt bucketNumber,
+            boolean originalFile,
+            AcidTransaction transaction,
+            RowFilter rowFilter)
+    {
         if (!PARQUET_SERDE_CLASS_NAMES.contains(getDeserializerClassName(schema))) {
             return Optional.empty();
         }
@@ -152,7 +175,8 @@ public class ParquetPageSourceFactory
                 timeZone,
                 stats,
                 options.withIgnoreStatistics(isParquetIgnoreStatistics(session))
-                        .withMaxReadBlockSize(getParquetMaxReadBlockSize(session))));
+                        .withMaxReadBlockSize(getParquetMaxReadBlockSize(session)),
+                rowFilter));
     }
 
     /**
@@ -171,7 +195,8 @@ public class ParquetPageSourceFactory
             String user,
             DateTimeZone timeZone,
             FileFormatDataSourceStats stats,
-            ParquetReaderOptions options)
+            ParquetReaderOptions options,
+            RowFilter rowFilter)
     {
         // Ignore predicates on partial columns for now.
         effectivePredicate = effectivePredicate.filter((column, domain) -> column.isBaseColumn());
@@ -205,12 +230,14 @@ public class ParquetPageSourceFactory
             requestedSchema = message.orElse(new MessageType(fileSchema.getName(), ImmutableList.of()));
             messageColumn = getColumnIO(fileSchema, requestedSchema);
 
-            ImmutableList.Builder<BlockMetaData> footerBlocks = ImmutableList.builder();
+            ImmutableList.Builder<ParquetBlockMetaData> footerBlocks = ImmutableList.builder();
+            long rowOffset = 0;
             for (BlockMetaData block : parquetMetadata.getBlocks()) {
                 long firstDataPage = block.getColumns().get(0).getFirstDataPageOffset();
                 if (firstDataPage >= start && firstDataPage < start + length) {
-                    footerBlocks.add(block);
+                    footerBlocks.add(new ParquetBlockMetaData(block, rowOffset));
                 }
+                rowOffset += block.getRowCount();
             }
 
             Map<List<String>, RichColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, requestedSchema);
@@ -219,10 +246,15 @@ public class ParquetPageSourceFactory
                     : getParquetTupleDomain(descriptorsByPath, effectivePredicate, fileSchema, useColumnNames);
 
             Predicate parquetPredicate = buildPredicate(requestedSchema, parquetTupleDomain, descriptorsByPath, timeZone);
-            ImmutableList.Builder<BlockMetaData> blocks = ImmutableList.builder();
-            for (BlockMetaData block : footerBlocks.build()) {
+            ImmutableList.Builder<ParquetBlockMetaData> blocks = ImmutableList.builder();
+            for (ParquetBlockMetaData block : footerBlocks.build()) {
                 if (predicateMatches(parquetPredicate, block, dataSource, descriptorsByPath, parquetTupleDomain)) {
-                    blocks.add(block);
+                    if (rowFilter.shouldCollectRange(block.getRowOffset(), block.getRowCount())) {
+                        blocks.add(block);
+                    }
+                }
+                else {
+                    rowFilter.skipRows(rowRange(block.getRowOffset(), block.getRowCount()));
                 }
             }
             parquetReader = new ParquetReader(
@@ -288,7 +320,7 @@ public class ParquetPageSourceFactory
             }));
         }
 
-        ConnectorPageSource parquetPageSource = new ParquetPageSource(parquetReader, prestoTypes.build(), internalFields.build());
+        ConnectorPageSource parquetPageSource = new ParquetPageSource(parquetReader, prestoTypes.build(), internalFields.build(), rowFilter);
         return new ReaderPageSource(parquetPageSource, readerProjections);
     }
 

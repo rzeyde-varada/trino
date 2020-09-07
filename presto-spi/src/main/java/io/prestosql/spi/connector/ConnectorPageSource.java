@@ -14,6 +14,7 @@
 package io.prestosql.spi.connector;
 
 import io.prestosql.spi.Page;
+import io.prestosql.spi.RowFilter;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -69,5 +70,15 @@ public interface ConnectorPageSource
     default CompletableFuture<?> isBlocked()
     {
         return NOT_BLOCKED;
+    }
+
+    default boolean supportsRowFiltering()
+    {
+        return false;
+    }
+
+    default RowFilter getRowFilter()
+    {
+        throw new UnsupportedOperationException("Row Filter is not supported");
     }
 }

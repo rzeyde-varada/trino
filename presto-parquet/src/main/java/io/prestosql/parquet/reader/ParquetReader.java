@@ -70,14 +70,16 @@ public class ParquetReader
     private static final int BATCH_SIZE_GROWTH_FACTOR = 2;
 
     private final Optional<String> fileCreatedBy;
-    private final List<BlockMetaData> blocks;
+    private final List<ParquetBlockMetaData> blocks;
     private final List<PrimitiveColumnIO> columns;
     private final ParquetDataSource dataSource;
     private final DateTimeZone timeZone;
     private final AggregatedMemoryContext systemMemoryContext;
 
+    // TODO: skip unneeded blocks in "read-time" (similar to ORC row groups)
+
     private int currentRowGroup = -1;
-    private BlockMetaData currentBlockMetadata;
+    private ParquetBlockMetaData currentBlockMetadata;
     private long currentGroupRowCount;
     private long nextRowInGroup;
     private int batchSize;
@@ -94,7 +96,7 @@ public class ParquetReader
     public ParquetReader(
             Optional<String> fileCreatedBy,
             MessageColumnIO messageColumnIO,
-            List<BlockMetaData> blocks,
+            List<ParquetBlockMetaData> blocks,
             ParquetDataSource dataSource,
             DateTimeZone timeZone,
             AggregatedMemoryContext systemMemoryContext,
@@ -324,5 +326,10 @@ public class ParquetReader
     public AggregatedMemoryContext getSystemMemoryContext()
     {
         return systemMemoryContext;
+    }
+
+    public long getFilePosition()
+    {
+        return currentBlockMetadata.getRowOffset() + nextRowInGroup;
     }
 }

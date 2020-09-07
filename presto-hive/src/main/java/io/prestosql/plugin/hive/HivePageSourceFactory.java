@@ -14,6 +14,7 @@
 package io.prestosql.plugin.hive;
 
 import io.prestosql.plugin.hive.acid.AcidTransaction;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.predicate.TupleDomain;
 import org.apache.hadoop.conf.Configuration;
@@ -40,4 +41,23 @@ public interface HivePageSourceFactory
             OptionalInt bucketNumber,
             boolean originalFile,
             AcidTransaction transaction);
+
+    default Optional<ReaderPageSource> createPageSource(
+            Configuration configuration,
+            ConnectorSession session,
+            Path path,
+            long start,
+            long length,
+            long estimatedFileSize,
+            Properties schema,
+            List<HiveColumnHandle> columns,
+            TupleDomain<HiveColumnHandle> effectivePredicate,
+            Optional<AcidInfo> acidInfo,
+            OptionalInt bucketNumber,
+            boolean originalFile,
+            AcidTransaction transaction,
+            RowFilter rowFilter)
+    {
+        return createPageSource(configuration, session, path, start, length, estimatedFileSize, schema, columns, effectivePredicate, acidInfo, bucketNumber, originalFile, transaction);
+    }
 }

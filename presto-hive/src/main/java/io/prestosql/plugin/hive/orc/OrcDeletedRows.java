@@ -91,26 +91,6 @@ public class OrcDeletedRows
         int getPositionCount();
 
         Block apply(Block block);
-
-        static MaskDeletedRowsFunction noMaskForPage(Page page)
-        {
-            return new MaskDeletedRowsFunction()
-            {
-                int positionCount = page.getPositionCount();
-
-                @Override
-                public int getPositionCount()
-                {
-                    return positionCount;
-                }
-
-                @Override
-                public Block apply(Block block)
-                {
-                    return block;
-                }
-            };
-        }
     }
 
     @NotThreadSafe

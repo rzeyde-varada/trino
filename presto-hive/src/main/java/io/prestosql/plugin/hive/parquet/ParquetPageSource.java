@@ -19,7 +19,9 @@ import io.prestosql.parquet.ParquetCorruptionException;
 import io.prestosql.parquet.reader.ParquetReader;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.block.Block;
+import io.prestosql.spi.block.DictionaryBlock;
 import io.prestosql.spi.block.LazyBlock;
 import io.prestosql.spi.block.LazyBlockLoader;
 import io.prestosql.spi.block.RunLengthEncodedBlock;
@@ -42,15 +44,17 @@ public class ParquetPageSource
     private final ParquetReader parquetReader;
     private final List<Type> types;
     private final List<Optional<Field>> fields;
+    private final RowFilter rowFilter;
 
     private int batchId;
     private boolean closed;
 
-    public ParquetPageSource(ParquetReader parquetReader, List<Type> types, List<Optional<Field>> fields)
+    public ParquetPageSource(ParquetReader parquetReader, List<Type> types, List<Optional<Field>> fields, RowFilter rowFilter)
     {
         this.parquetReader = requireNonNull(parquetReader, "parquetReader is null");
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
         this.fields = ImmutableList.copyOf(requireNonNull(fields, "fields is null"));
+        this.rowFilter = requireNonNull(rowFilter, "rowFilter is null");
     }
 
     @Override
@@ -89,6 +93,11 @@ public class ParquetPageSource
                 return null;
             }
 
+            long rowOffset = parquetReader.getFilePosition() - batchSize;
+            Optional<int[]> validPositions = Optional.empty();
+            if (!rowFilter.isAll()) {
+                validPositions = Optional.of(rowFilter.getValidPositions(rowOffset, batchSize).toArray());
+            }
             Block[] blocks = new Block[fields.size()];
             for (int fieldId = 0; fieldId < blocks.length; fieldId++) {
                 Optional<Field> field = fields.get(fieldId);
@@ -98,7 +107,16 @@ public class ParquetPageSource
                 else {
                     blocks[fieldId] = RunLengthEncodedBlock.create(types.get(fieldId), null, batchSize);
                 }
+                Block block = blocks[fieldId];
+                blocks[fieldId] = validPositions
+                        .map(positions -> {
+                            if (positions.length == block.getPositionCount()) {
+                                return block;
+                            }
+                            return new DictionaryBlock(block, positions);
+                        }).orElse(block);
             }
+            batchSize = validPositions.map(positions -> positions.length).orElse(batchSize);
             return new Page(batchSize, blocks);
         }
         catch (PrestoException e) {
@@ -109,6 +127,12 @@ public class ParquetPageSource
             closeWithSuppression(e);
             throw new PrestoException(HIVE_CURSOR_ERROR, e);
         }
+    }
+
+    @Override
+    public RowFilter getRowFilter()
+    {
+        return rowFilter;
     }
 
     private void closeWithSuppression(Throwable throwable)
@@ -173,5 +197,11 @@ public class ParquetPageSource
             loaded = true;
             return block;
         }
+    }
+
+    @Override
+    public boolean supportsRowFiltering()
+    {
+        return true;
     }
 }

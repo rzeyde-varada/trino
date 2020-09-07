@@ -23,8 +23,10 @@ import io.prestosql.plugin.hive.HiveConfig;
 import io.prestosql.plugin.hive.HivePageSourceFactory;
 import io.prestosql.plugin.hive.ReaderPageSource;
 import io.prestosql.spi.Page;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.predicate.Domain;
+import io.prestosql.spi.predicate.NullableValue;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.type.Type;
 import io.prestosql.tpch.Nation;
@@ -45,6 +47,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongPredicate;
+import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -55,6 +58,7 @@ import static io.prestosql.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
 import static io.prestosql.plugin.hive.HiveTestUtils.SESSION;
 import static io.prestosql.plugin.hive.HiveType.toHiveType;
 import static io.prestosql.plugin.hive.acid.AcidTransaction.NO_ACID_TRANSACTION;
+import static io.prestosql.spi.RowFilter.rowRange;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
@@ -62,13 +66,13 @@ import static io.prestosql.tpch.NationColumn.COMMENT;
 import static io.prestosql.tpch.NationColumn.NAME;
 import static io.prestosql.tpch.NationColumn.NATION_KEY;
 import static io.prestosql.tpch.NationColumn.REGION_KEY;
-import static java.util.Collections.nCopies;
 import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.FILE_INPUT_FORMAT;
 import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.TABLE_IS_TRANSACTIONAL;
 import static org.apache.hadoop.hive.ql.io.AcidUtils.deleteDeltaSubdir;
 import static org.apache.hadoop.hive.serde.serdeConstants.SERIALIZATION_LIB;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
 
 public class TestOrcPageSourceFactory
 {
@@ -83,13 +87,19 @@ public class TestOrcPageSourceFactory
     @Test
     public void testFullFileRead()
     {
-        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.empty(), nationKey -> false);
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.empty(), nationKey -> false, RowFilter.ALL_ROWS, OptionalInt.empty());
+    }
+
+    @Test
+    public void testFullFileReadWithMaxRowNumber()
+    {
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.empty(), nationKey -> false, new RowFilter(), OptionalInt.of(900));
     }
 
     @Test
     public void testSingleColumnRead()
     {
-        assertRead(ImmutableSet.of(REGION_KEY), OptionalLong.empty(), Optional.empty(), nationKey -> false);
+        assertRead(ImmutableSet.of(REGION_KEY), OptionalLong.empty(), Optional.empty(), nationKey -> false, RowFilter.ALL_ROWS, OptionalInt.empty());
     }
 
     /**
@@ -98,7 +108,11 @@ public class TestOrcPageSourceFactory
     @Test
     public void testFullFileSkipped()
     {
-        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.of(100L), Optional.empty(), nationKey -> false);
+        RowFilter rowFilter = new RowFilter();
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.of(100L), Optional.empty(), nationKey -> false, rowFilter, OptionalInt.empty());
+        assertEquals(
+                rowFilter.getValidPositions(0, 25000).toArray(),
+                new int[0]);
     }
 
     /**
@@ -107,7 +121,26 @@ public class TestOrcPageSourceFactory
     @Test
     public void testSomeStripesAndRowGroupRead()
     {
-        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.of(5L), Optional.empty(), nationKey -> false);
+        RowFilter rowFilter = new RowFilter();
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.of(5L), Optional.empty(), nationKey -> false, rowFilter, OptionalInt.empty());
+        assertEquals(
+                rowFilter.getValidPositions(0, 25000).toArray(),
+                IntStream.range(5000, 6000).toArray());
+    }
+
+    /**
+     * Tests stripe stats and row groups row-based based pruning works fine
+     */
+    @Test
+    public void testSomeStripesAndRowGroupSkip()
+    {
+        RowFilter rowFilter = new RowFilter();
+        rowFilter.skipRows(rowRange(0, 12000));
+        rowFilter.skipRows(rowRange(13000, 12000));
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.empty(), nationKey -> false, rowFilter, OptionalInt.empty());
+        assertEquals(
+                rowFilter.getValidPositions(0, 25000).toArray(),
+                IntStream.range(12000, 13000).toArray());
     }
 
     @Test
@@ -119,7 +152,23 @@ public class TestOrcPageSourceFactory
                 .addDeleteDelta(new Path(partitionLocation, deleteDeltaSubdir(4L, 4L, 0)))
                 .build();
 
-        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), acidInfo, nationKey -> nationKey == 5 || nationKey == 19);
+        RowFilter rowFilter = new RowFilter();
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), acidInfo, nationKey -> nationKey == 5 || nationKey == 19, rowFilter, OptionalInt.empty());
+        assertTrue(rowFilter.isAll());
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Deleted rows are not supported with non-trivial RowFilter")
+    public void testUnsupportedDeletedRowsAndRowFilter()
+    {
+        Path partitionLocation = new Path(getClass().getClassLoader().getResource("nation_delete_deltas") + "/");
+        Optional<AcidInfo> acidInfo = AcidInfo.builder(partitionLocation)
+                .addDeleteDelta(new Path(partitionLocation, deleteDeltaSubdir(3L, 3L, 0)))
+                .addDeleteDelta(new Path(partitionLocation, deleteDeltaSubdir(4L, 4L, 0)))
+                .build();
+
+        RowFilter rowFilter = new RowFilter();
+        rowFilter.skipRows(rowRange(12345, 67));
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), acidInfo, nationKey -> nationKey == 5 || nationKey == 19, rowFilter, OptionalInt.empty());
     }
 
     @Test
@@ -133,8 +182,8 @@ public class TestOrcPageSourceFactory
                 .addOriginalFile(new Path(tablePath, "000000_0"), 1780, 0)
                 .buildWithRequiredOriginalFiles(0);
 
-        List<Nation> expected = expectedResult(OptionalLong.empty(), nationKey -> nationKey == 24, 1);
-        List<Nation> result = readFile(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.of(acidInfo), tablePath + "/000000_0", 1780);
+        List<Nation> expected = expectedResult(OptionalLong.empty(), nationKey -> nationKey == 24, 1, RowFilter.ALL_ROWS);
+        List<Nation> result = readFile(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.of(acidInfo), RowFilter.ALL_ROWS, tablePath + "/000000_0", 1780, OptionalInt.empty());
 
         assertEquals(result.size(), expected.size());
         int deletedRowKey = 24;
@@ -143,36 +192,86 @@ public class TestOrcPageSourceFactory
                 "Deleted row shouldn't be present in the result");
     }
 
-    private static void assertRead(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, LongPredicate deletedRows)
+    @Test
+    public void testSkippedRows()
     {
-        List<Nation> actual = readFile(columns, nationKeyPredicate, acidInfo);
+        RowFilter rowFilter = new RowFilter();
+        rowFilter.skipRows(rowRange(0, 11500));
+        rowFilter.skipRows(rowRange(13500, 11500));
+        assertRead(ImmutableSet.copyOf(NationColumn.values()), OptionalLong.empty(), Optional.empty(), nationKey -> false, rowFilter, OptionalInt.empty());
+        assertEquals(
+                rowFilter.getValidPositions(0, 25000).toArray(),
+                IntStream.range(11500, 13500).toArray());
+    }
 
-        List<Nation> expected = expectedResult(nationKeyPredicate, deletedRows, 1000);
+    @Test
+    public void testMultiColumns()
+    {
+        RowFilter rowFilter = new RowFilter();
+        // skipping [5k,10k), [15k,20k) due to region=4 predicate
+        HiveColumnHandle regionKey = toHiveColumnHandle(REGION_KEY, 2);
+        ConnectorPageSource pageSource1 = createPageSource(
+                ImmutableList.of(regionKey),
+                TupleDomain.fromFixedValues(ImmutableMap.of(regionKey, NullableValue.of(BIGINT, 4L))),
+                Optional.empty(),
+                rowFilter);
+        assertTrue(pageSource1.supportsRowFiltering());
+        // skipping [0k,5k), [10k,25k) due to nation-5 predicate
+        HiveColumnHandle nationKey = toHiveColumnHandle(NATION_KEY, 0);
+        ConnectorPageSource pageSource2 = createPageSource(
+                ImmutableList.of(nationKey),
+                TupleDomain.fromFixedValues(ImmutableMap.of(nationKey, NullableValue.of(BIGINT, 5L))),
+                Optional.empty(),
+                rowFilter);
+        assertTrue(pageSource2.supportsRowFiltering());
+        // everything is skipped - no pages are read:
+        assertEquals(
+                rowFilter.getValidPositions(0, 25000).toArray(),
+                new int[0]);
+        assertEquals(pageSource1.getNextPage(), null);
+        assertEquals(pageSource2.getNextPage(), null);
+        assertTrue(pageSource1.isFinished());
+        assertTrue(pageSource2.isFinished());
+    }
+
+    private static void assertRead(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, LongPredicate deletedRows, RowFilter rowFilter, OptionalInt maxRowsInEachPage)
+    {
+        List<Nation> actual = readFile(columns, nationKeyPredicate, acidInfo, rowFilter, maxRowsInEachPage);
+
+        List<Nation> expected = expectedResult(nationKeyPredicate, deletedRows, 1000, rowFilter);
 
         assertEqualsByColumns(columns, actual, expected);
     }
 
-    private static List<Nation> expectedResult(OptionalLong nationKeyPredicate, LongPredicate deletedRows, int replicationFactor)
+    private static List<Nation> expectedResult(OptionalLong nationKeyPredicate, LongPredicate deletedRows, int replicationFactor, RowFilter rowFilter)
     {
         List<Nation> expected = new ArrayList<>();
+        int rowIndex = 0;
         for (Nation nation : ImmutableList.copyOf(new NationGenerator().iterator())) {
             if (nationKeyPredicate.isPresent() && nationKeyPredicate.getAsLong() != nation.getNationKey()) {
+                rowIndex += replicationFactor;
                 continue;
             }
             if (deletedRows.test(nation.getNationKey())) {
+                rowIndex += replicationFactor;
                 continue;
             }
-            expected.addAll(nCopies(replicationFactor, nation));
+            for (int i = 0; i < replicationFactor; ++i) {
+                if (rowFilter.shouldCollectRange(rowIndex, 1)) {
+                    expected.add(nation);
+                }
+                ++rowIndex;
+            }
         }
         return expected;
     }
 
-    private static List<Nation> readFile(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo)
+    private static List<Nation> readFile(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, RowFilter rowFilter, OptionalInt maxRowsInEachPage)
     {
-        return readFile(columns, nationKeyPredicate, acidInfo, TEST_FILE.toURI().getPath(), TEST_FILE.length());
+        return readFile(columns, nationKeyPredicate, acidInfo, rowFilter, TEST_FILE.toURI().getPath(), TEST_FILE.length(), maxRowsInEachPage);
     }
 
-    private static List<Nation> readFile(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, String filePath, long fileSize)
+    private static List<Nation> readFile(Set<NationColumn> columns, OptionalLong nationKeyPredicate, Optional<AcidInfo> acidInfo, RowFilter rowFilter, String filePath, long fileSize, OptionalInt maxRowsInEachPage)
     {
         TupleDomain<HiveColumnHandle> tupleDomain = TupleDomain.all();
         if (nationKeyPredicate.isPresent()) {
@@ -201,7 +300,8 @@ public class TestOrcPageSourceFactory
                 acidInfo,
                 OptionalInt.empty(),
                 false,
-                NO_ACID_TRANSACTION);
+                NO_ACID_TRANSACTION,
+                rowFilter);
 
         checkArgument(pageSourceWithProjections.isPresent());
         checkArgument(pageSourceWithProjections.get().getReaderColumns().isEmpty(),
@@ -221,7 +321,6 @@ public class TestOrcPageSourceFactory
                 continue;
             }
 
-            page = page.getLoadedPage();
             for (int position = 0; position < page.getPositionCount(); position++) {
                 long nationKey = -42;
                 if (nationKeyColumn >= 0) {
@@ -247,6 +346,36 @@ public class TestOrcPageSourceFactory
             }
         }
         return rows.build();
+    }
+
+    private static ConnectorPageSource createPageSource(List<HiveColumnHandle> columnHandles, TupleDomain<HiveColumnHandle> tupleDomain, Optional<AcidInfo> acidInfo, RowFilter rowFilter)
+    {
+        return createPageSource(columnHandles, tupleDomain, acidInfo, TEST_FILE.toURI().getPath(), TEST_FILE.length(), rowFilter);
+    }
+
+    private static ConnectorPageSource createPageSource(List<HiveColumnHandle> columnHandles, TupleDomain<HiveColumnHandle> tupleDomain, Optional<AcidInfo> acidInfo, String filePath, long fileSize, RowFilter rowFilter)
+    {
+        Optional<ReaderPageSource> pageSourceWithProjections = PAGE_SOURCE_FACTORY.createPageSource(
+                new JobConf(new Configuration(false)),
+                SESSION,
+                new Path(filePath),
+                0,
+                fileSize,
+                fileSize,
+                createSchema(),
+                columnHandles,
+                tupleDomain,
+                acidInfo,
+                OptionalInt.empty(),
+                false,
+                NO_ACID_TRANSACTION,
+                rowFilter);
+
+        checkArgument(pageSourceWithProjections.isPresent());
+        checkArgument(pageSourceWithProjections.get().getReaderColumns().isEmpty(),
+                "projected columns not expected here");
+
+        return pageSourceWithProjections.get().get();
     }
 
     private static HiveColumnHandle toHiveColumnHandle(NationColumn nationColumn, int hiveColumnIndex)

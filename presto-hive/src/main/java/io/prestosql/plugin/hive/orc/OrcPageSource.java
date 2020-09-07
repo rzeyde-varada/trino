@@ -25,7 +25,9 @@ import io.prestosql.plugin.hive.FileFormatDataSourceStats;
 import io.prestosql.plugin.hive.orc.OrcDeletedRows.MaskDeletedRowsFunction;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.block.Block;
+import io.prestosql.spi.block.DictionaryBlock;
 import io.prestosql.spi.block.LazyBlock;
 import io.prestosql.spi.block.LazyBlockLoader;
 import io.prestosql.spi.block.LongArrayBlock;
@@ -135,14 +137,71 @@ public class OrcPageSource
         OptionalLong startRowId = originalFileRowId.isPresent() ?
                 OptionalLong.of(originalFileRowId.get() + recordReader.getFilePosition()) : OptionalLong.empty();
 
+        RowFilter rowFilter = recordReader.getRowFilter();
+        if (deletedRows.isPresent() && !rowFilter.isAll()) {
+            throw new IllegalArgumentException("Deleted rows are not supported with non-trivial RowFilter");
+        }
+        long rowOffset = recordReader.getFilePosition();
         MaskDeletedRowsFunction maskDeletedRowsFunction = deletedRows
                 .map(deletedRows -> deletedRows.getMaskDeletedRowsFunction(page, startRowId))
-                .orElseGet(() -> MaskDeletedRowsFunction.noMaskForPage(page));
+                .orElseGet(() -> selectRows(page, rowFilter, rowOffset));
         Block[] blocks = new Block[columnAdaptations.size()];
         for (int i = 0; i < columnAdaptations.size(); i++) {
             blocks[i] = columnAdaptations.get(i).block(page, maskDeletedRowsFunction, recordReader.getFilePosition());
         }
         return new Page(maskDeletedRowsFunction.getPositionCount(), blocks);
+    }
+
+    @Override
+    public RowFilter getRowFilter()
+    {
+        return recordReader.getRowFilter();
+    }
+
+    private static MaskDeletedRowsFunction selectRows(Page page, RowFilter rowFilter, long rowOffset)
+    {
+        if (rowFilter.isAll()) {
+            int positionCount = page.getPositionCount();
+            return new MaskDeletedRowsFunction()
+            {
+                @Override
+                public int getPositionCount()
+                {
+                    return positionCount;
+                }
+
+                @Override
+                public Block apply(Block block)
+                {
+                    return block;
+                }
+            };
+        }
+
+        int[] validPositions = rowFilter.getValidPositions(rowOffset, page.getPositionCount()).toArray();
+        return new MaskDeletedRowsFunction()
+        {
+            @Override
+            public int getPositionCount()
+            {
+                return validPositions.length;
+            }
+
+            @Override
+            public Block apply(Block block)
+            {
+                if (block.getPositionCount() == validPositions.length) {
+                    return block;
+                }
+                return new DictionaryBlock(block, validPositions);
+            }
+        };
+    }
+
+    @Override
+    public boolean supportsRowFiltering()
+    {
+        return true;
     }
 
     static PrestoException handleException(OrcDataSourceId dataSourceId, Exception exception)

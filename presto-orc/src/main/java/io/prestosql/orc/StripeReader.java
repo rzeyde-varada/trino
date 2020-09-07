@@ -44,6 +44,7 @@ import io.prestosql.orc.stream.OrcInputStream;
 import io.prestosql.orc.stream.ValueInputStream;
 import io.prestosql.orc.stream.ValueInputStreamSource;
 import io.prestosql.orc.stream.ValueStreams;
+import io.prestosql.spi.RowFilter;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -73,6 +74,7 @@ import static io.prestosql.orc.metadata.Stream.StreamKind.DICTIONARY_DATA;
 import static io.prestosql.orc.metadata.Stream.StreamKind.LENGTH;
 import static io.prestosql.orc.metadata.Stream.StreamKind.ROW_INDEX;
 import static io.prestosql.orc.stream.CheckpointInputStreamSource.createCheckpointStreamSource;
+import static io.prestosql.spi.RowFilter.rowRange;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -86,6 +88,7 @@ public class StripeReader
     private final Set<OrcColumnId> includedOrcColumnIds;
     private final OptionalInt rowsInRowGroup;
     private final OrcPredicate predicate;
+    private final RowFilter rowFilter;
     private final MetadataReader metadataReader;
     private final Optional<OrcWriteValidation> writeValidation;
 
@@ -97,6 +100,7 @@ public class StripeReader
             Set<OrcColumn> readColumns,
             OptionalInt rowsInRowGroup,
             OrcPredicate predicate,
+            RowFilter rowFilter,
             HiveWriterVersion hiveWriterVersion,
             MetadataReader metadataReader,
             Optional<OrcWriteValidation> writeValidation)
@@ -108,12 +112,13 @@ public class StripeReader
         this.includedOrcColumnIds = getIncludeColumns(requireNonNull(readColumns, "readColumns is null"));
         this.rowsInRowGroup = rowsInRowGroup;
         this.predicate = requireNonNull(predicate, "predicate is null");
+        this.rowFilter = requireNonNull(rowFilter, "rowFilter is null");
         this.hiveWriterVersion = requireNonNull(hiveWriterVersion, "hiveWriterVersion is null");
         this.metadataReader = requireNonNull(metadataReader, "metadataReader is null");
         this.writeValidation = requireNonNull(writeValidation, "writeValidation is null");
     }
 
-    public Stripe readStripe(StripeInformation stripe, AggregatedMemoryContext systemMemoryUsage)
+    public Stripe readStripe(long currentStripePosition, StripeInformation stripe, AggregatedMemoryContext systemMemoryUsage)
             throws IOException
     {
         // read the stripe footer
@@ -152,7 +157,7 @@ public class StripeReader
             }
 
             // select the row groups matching the tuple domain
-            Set<Integer> selectedRowGroups = selectRowGroups(stripe, columnIndexes);
+            Set<Integer> selectedRowGroups = selectRowGroups(currentStripePosition, stripe, columnIndexes);
 
             // if all row groups are skipped, return null
             if (selectedRowGroups.isEmpty()) {
@@ -446,7 +451,7 @@ public class StripeReader
         return columnIndexes.build();
     }
 
-    private Set<Integer> selectRowGroups(StripeInformation stripe, Map<StreamId, List<RowGroupIndex>> columnIndexes)
+    private Set<Integer> selectRowGroups(long currentStripePosition, StripeInformation stripe, Map<StreamId, List<RowGroupIndex>> columnIndexes)
     {
         int rowsInRowGroup = this.rowsInRowGroup.orElseThrow(() -> new IllegalStateException("Cannot create row groups if row group info is missing"));
 
@@ -459,8 +464,14 @@ public class StripeReader
             int rows = Math.min(remainingRows, rowsInRowGroup);
             ColumnMetadata<ColumnStatistics> statistics = getRowGroupStatistics(types, columnIndexes, rowGroup);
             if (predicate.matches(rows, statistics)) {
-                selectedRowGroups.add(rowGroup);
+                if (rowFilter.shouldCollectRange(currentStripePosition, rows)) {
+                    selectedRowGroups.add(rowGroup);
+                }
             }
+            else {
+                rowFilter.skipRows(rowRange(currentStripePosition, rows));
+            }
+            currentStripePosition += rows;
             remainingRows -= rows;
         }
         return selectedRowGroups.build();

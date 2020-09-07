@@ -30,6 +30,7 @@ import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.orc.OrcFileWriterFactory;
 import io.prestosql.plugin.hive.orc.OrcPageSource;
 import io.prestosql.plugin.hive.util.HiveBucketing.BucketingVersion;
+import io.prestosql.spi.RowFilter;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.connector.ConnectorPageSourceProvider;
@@ -133,6 +134,19 @@ public class HivePageSourceProvider
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter)
     {
+        return createPageSource(transaction, session, split, tableHandle, columns, dynamicFilter, RowFilter.ALL_ROWS);
+    }
+
+    @Override
+    public ConnectorPageSource createPageSource(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle tableHandle,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter,
+            RowFilter rowFilter)
+    {
         HiveTableHandle hiveTable = (HiveTableHandle) tableHandle;
         HiveSplit hiveSplit = (HiveSplit) split;
 
@@ -174,7 +188,8 @@ public class HivePageSourceProvider
                 hiveSplit.isS3SelectPushdownEnabled(),
                 hiveSplit.getAcidInfo(),
                 originalFile,
-                hiveTable.getTransaction());
+                hiveTable.getTransaction(),
+                rowFilter);
 
         if (pageSource.isPresent()) {
             ConnectorPageSource source = pageSource.get();
@@ -230,6 +245,35 @@ public class HivePageSourceProvider
             boolean originalFile,
             AcidTransaction transaction)
     {
+        return createHivePageSource(pageSourceFactories, cursorProviders, configuration, session, path, bucketNumber, start, length, estimatedFileSize, fileModifiedTime, schema, effectivePredicate, columns, partitionName, partitionKeys, typeManager, tableToPartitionMapping, bucketConversion, bucketValidation, s3SelectPushdownEnabled, acidInfo, originalFile, transaction, RowFilter.ALL_ROWS);
+    }
+
+    public static Optional<ConnectorPageSource> createHivePageSource(
+            Set<HivePageSourceFactory> pageSourceFactories,
+            Set<HiveRecordCursorProvider> cursorProviders,
+            Configuration configuration,
+            ConnectorSession session,
+            Path path,
+            OptionalInt bucketNumber,
+            long start,
+            long length,
+            long estimatedFileSize,
+            long fileModifiedTime,
+            Properties schema,
+            TupleDomain<HiveColumnHandle> effectivePredicate,
+            List<HiveColumnHandle> columns,
+            String partitionName,
+            List<HivePartitionKey> partitionKeys,
+            TypeManager typeManager,
+            TableToPartitionMapping tableToPartitionMapping,
+            Optional<BucketConversion> bucketConversion,
+            Optional<BucketValidation> bucketValidation,
+            boolean s3SelectPushdownEnabled,
+            Optional<AcidInfo> acidInfo,
+            boolean originalFile,
+            AcidTransaction transaction,
+            RowFilter rowFilter)
+    {
         if (effectivePredicate.isNone()) {
             return Optional.of(new EmptyPageSource());
         }
@@ -265,7 +309,8 @@ public class HivePageSourceProvider
                     acidInfo,
                     bucketNumber,
                     originalFile,
-                    transaction);
+                    transaction,
+                    rowFilter);
 
             if (readerWithProjections.isPresent()) {
                 ConnectorPageSource pageSource = readerWithProjections.get().get();
