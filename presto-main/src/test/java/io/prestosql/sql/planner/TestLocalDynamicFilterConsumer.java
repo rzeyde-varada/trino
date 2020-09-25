@@ -26,6 +26,7 @@ import io.prestosql.sql.planner.assertions.BasePlanTest;
 import io.prestosql.sql.planner.optimizations.PlanNodeSearcher;
 import io.prestosql.sql.planner.plan.DynamicFilterId;
 import io.prestosql.sql.planner.plan.JoinNode;
+import io.prestosql.sql.planner.plan.PlanNode;
 import org.testng.annotations.Test;
 
 import java.util.List;
@@ -43,6 +44,7 @@ import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.sql.planner.LogicalPlanner.Stage.OPTIMIZED_AND_VALIDATED;
 import static io.prestosql.testing.assertions.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
 
 public class TestLocalDynamicFilterConsumer
         extends BasePlanTest
@@ -324,6 +326,20 @@ public class TestLocalDynamicFilterConsumer
             assertEquals(filter.getDynamicFilterDomains().get(), ImmutableMap.of(
                     filterId, Domain.singleValue(BIGINT, 6L)));
         }
+    }
+
+    @Test
+    public void testCrossJoin()
+    {
+        SubPlan subplan = subplan(
+                "SELECT * FROM lineitem, orders " +
+                        "WHERE lineitem.orderkey <= orders.orderkey " +
+                        "AND orders.comment = 'nstructions sleep furiously among '",
+                OPTIMIZED_AND_VALIDATED,
+                false);
+        JoinNode joinNode = searchJoins(subplan.getFragment()).<JoinNode>findSingle().get();
+        assertTrue(joinNode.getCriteria().isEmpty());
+        assertTrue(joinNode.getFilter().isEmpty());
     }
 
     @Test
