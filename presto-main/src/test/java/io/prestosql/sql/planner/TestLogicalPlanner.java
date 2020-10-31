@@ -291,6 +291,19 @@ public class TestLogicalPlanner
     }
 
     @Test
+    public void testAddProjectForComplexBuildExpression()
+    {
+        assertPlan("SELECT 1 FROM lineitem JOIN orders ON lineitem.orderkey < orders.orderkey + 1",
+                anyTree(
+                        filter("L_ORDERKEY < EXPR",
+                                join(INNER, ImmutableList.of(), Optional.empty(),
+                                        tableScan("lineitem", ImmutableMap.of("L_ORDERKEY", "orderkey")),
+                                        exchange(project(
+                                                ImmutableMap.of("EXPR", expression("O_ORDERKEY + BIGINT '1'")),
+                                                tableScan("orders", ImmutableMap.of("O_ORDERKEY", "orderkey"))))))));
+    }
+
+    @Test
     public void testDistinctLimitOverInequalityJoin()
     {
         assertPlan("SELECT DISTINCT o.orderkey FROM orders o JOIN lineitem l ON o.orderkey < l.orderkey LIMIT 1",
