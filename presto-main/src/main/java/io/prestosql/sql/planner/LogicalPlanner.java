@@ -60,6 +60,7 @@ import io.prestosql.sql.planner.plan.TableFinishNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.planner.plan.TableWriterNode;
 import io.prestosql.sql.planner.plan.ValuesNode;
+import io.prestosql.sql.planner.planprinter.PlanPrinter;
 import io.prestosql.sql.planner.sanity.PlanSanityChecker;
 import io.prestosql.sql.tree.Analyze;
 import io.prestosql.sql.tree.Cast;
@@ -200,6 +201,9 @@ public class LogicalPlanner
         PlanNode root = planStatement(analysis, analysis.getStatement());
 
         planSanityChecker.validateIntermediatePlan(root, session, metadata, typeOperators, typeAnalyzer, symbolAllocator.getTypes(), warningCollector);
+
+        String textPlan = PlanPrinter.textLogicalPlan(root, symbolAllocator.getTypes(), metadata, StatsAndCosts.empty(), session, 0, false);
+        System.err.println("===================\nINITIAL\n===================\n" + textPlan);
 
         if (stage.ordinal() >= OPTIMIZED.ordinal()) {
             for (PlanOptimizer optimizer : planOptimizers) {
