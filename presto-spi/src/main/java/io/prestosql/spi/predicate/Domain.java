@@ -96,6 +96,18 @@ public final class Domain
         return new Domain(ValueSet.of(type, values.get(0), values.subList(1, values.size()).toArray()), false);
     }
 
+    public static Domain ofLike(Type columnType, String pattern)
+    {
+        // HACK: side-channel for passing LIKE patterns to connectors.
+        return new Domain(ValueSet.ofLike(columnType, pattern), false);
+    }
+
+    public static Domain ofRegexpLike(Type columnType, String pattern)
+    {
+        // HACK: side-channel for passing REGEXP LIKE patterns to connectors.
+        return new Domain(ValueSet.ofRegexpLike(columnType, pattern), false);
+    }
+
     public Type getType()
     {
         return values.getType();

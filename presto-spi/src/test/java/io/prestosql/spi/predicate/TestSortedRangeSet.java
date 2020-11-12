@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
 import io.airlift.json.ObjectMapperProvider;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.block.TestingBlockEncodingSerde;
@@ -501,6 +502,373 @@ public class TestSortedRangeSet
 
         set = SortedRangeSet.of(Range.equal(BOOLEAN, true), Range.equal(BOOLEAN, false));
         assertEquals(set, mapper.readValue(mapper.writeValueAsString(set), SortedRangeSet.class));
+    }
+
+    @Test
+    public void testSuffix()
+    {
+        SortedRangeSet suffixes = likePatterns("%123", "%45", "%6");
+        assertEquals(suffixes.getStringMatchers().getLikePatterns(), Sets.newHashSet("%123", "%45", "%6"));
+        assertTrue(suffixes.getOrderedRanges().isEmpty());
+        assertEquals(suffixes.isNone(), false);
+        assertEquals(suffixes.isAll(), false);
+
+        SortedRangeSet empty = likePatterns();
+        assertTrue(empty.getStringMatchers().getLikePatterns().isEmpty());
+        assertEquals(empty.isNone(), true);
+        assertEquals(suffixes.isAll(), false);
+
+        assertEquals(likePatterns("%123").union(likePatterns("%456")).getStringMatchers().getLikePatterns(),
+                     Sets.newHashSet("%123", "%456"));
+        assertEquals(likePatterns("%123", "%234").union(likePatterns("%234", "%345")).getStringMatchers().getLikePatterns(),
+                     Sets.newHashSet("%123", "%234", "%345"));
+
+        assertEquals(likePatterns("%123").union(SortedRangeSet.none(VARCHAR)), likePatterns("%123"));
+        assertEquals(likePatterns("%123").union(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).union(likePatterns("%123")), likePatterns("%123"));
+        assertEquals(SortedRangeSet.all(VARCHAR).union(likePatterns("%123")), SortedRangeSet.all(VARCHAR));
+
+        assertEquals(likePatterns("%123").intersect(SortedRangeSet.none(VARCHAR)), SortedRangeSet.none(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).intersect(likePatterns("%123")), SortedRangeSet.none(VARCHAR));
+        // Note: the following results are suboptimal.
+        assertEquals(likePatterns("%123").intersect(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.all(VARCHAR).intersect(likePatterns("%123")), SortedRangeSet.all(VARCHAR));
+
+        ValueSet r1 = ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"));
+        ValueSet r2 = ValueSet.of(VARCHAR, utf8Slice("b"), utf8Slice("c"));
+        ValueSet s1 = likePatterns("%x", "%y");
+        ValueSet s2 = likePatterns("%y", "%z");
+
+        assertEquals(r1.union(r2), ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"), utf8Slice("c")));
+        assertEquals(r2.union(r1), ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"), utf8Slice("c")));
+        assertEquals(s1.union(s2), likePatterns("%x", "%y", "%z"));
+        assertEquals(s2.union(s1), likePatterns("%x", "%y", "%z"));
+        assertEquals(r1.intersect(r2), ValueSet.of(VARCHAR, utf8Slice("b")));
+        assertEquals(r2.intersect(r1), ValueSet.of(VARCHAR, utf8Slice("b")));
+        assertEquals(s1.intersect(s2), s2);
+        assertEquals(s2.intersect(s1), s1);
+
+        assertEquals(r1.intersect(s1), r1);
+        assertEquals(r1.intersect(s2), r1);
+        assertEquals(r2.intersect(s1), r2);
+        assertEquals(r2.intersect(s2), r2);
+
+        assertEquals(s1.intersect(r1), r1);
+        assertEquals(s1.intersect(r2), r2);
+        assertEquals(s2.intersect(r1), r1);
+        assertEquals(s2.intersect(r2), r2);
+
+        assertEquals(r2.union(s2).intersect(r1), r1);
+        assertEquals(r1.union(s1).intersect(r2), r2);
+        assertEquals(r1.intersect(r2.union(s2)), r1);
+        assertEquals(r2.intersect(r1.union(s1)), r2);
+
+        assertEquals(r1.union(s1).intersect(r2.union(s2)), r1.union(r2).union(s2));
+        assertEquals(r2.union(s2).intersect(r1.union(s1)), r1.union(r2).union(s1));
+    }
+
+    @Test
+    public void testPrefix()
+    {
+        SortedRangeSet prefixes = likePatterns("123%", "45%", "6%");
+        assertEquals(prefixes.getStringMatchers().getLikePatterns(), Sets.newHashSet("123%", "45%", "6%"));
+        assertTrue(prefixes.getOrderedRanges().isEmpty());
+        assertFalse(prefixes.isNone());
+        assertFalse(prefixes.isAll());
+
+        SortedRangeSet empty = likePatterns();
+        assertTrue(empty.getStringMatchers().getLikePatterns().isEmpty());
+        assertTrue(empty.isNone());
+        assertFalse(prefixes.isAll());
+
+        assertEquals(likePatterns("123%").union(likePatterns("456%")).getStringMatchers().getLikePatterns(),
+                     Sets.newHashSet("123%", "456%"));
+        assertEquals(likePatterns("123%", "234%").union(likePatterns("234%", "345%")).getStringMatchers().getLikePatterns(),
+                     Sets.newHashSet("123%", "234%", "345%"));
+
+        assertEquals(likePatterns("123%").union(SortedRangeSet.none(VARCHAR)), likePatterns("123%"));
+        assertEquals(likePatterns("123%").union(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).union(likePatterns("123%")), likePatterns("123%"));
+        assertEquals(SortedRangeSet.all(VARCHAR).union(likePatterns("123%")), SortedRangeSet.all(VARCHAR));
+
+        assertEquals(likePatterns("123%").intersect(SortedRangeSet.none(VARCHAR)), SortedRangeSet.none(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).intersect(likePatterns("123%")), SortedRangeSet.none(VARCHAR));
+        // Note: the following results are suboptimal.
+        assertEquals(likePatterns("123%").intersect(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.all(VARCHAR).intersect(likePatterns("123%")), SortedRangeSet.all(VARCHAR));
+
+        ValueSet r1 = ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"));
+        ValueSet r2 = ValueSet.of(VARCHAR, utf8Slice("b"), utf8Slice("c"));
+        ValueSet s1 = likePatterns("x%", "y%");
+        ValueSet s2 = likePatterns("y%", "z%");
+
+        assertEquals(r1.union(r2), ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"), utf8Slice("c")));
+        assertEquals(r2.union(r1), ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"), utf8Slice("c")));
+        assertEquals(s1.union(s2), likePatterns("x%", "y%", "z%"));
+        assertEquals(s2.union(s1), likePatterns("x%", "y%", "z%"));
+        assertEquals(r1.intersect(r2), ValueSet.of(VARCHAR, utf8Slice("b")));
+        assertEquals(r2.intersect(r1), ValueSet.of(VARCHAR, utf8Slice("b")));
+        assertEquals(s1.intersect(s2), s2);
+        assertEquals(s2.intersect(s1), s1);
+
+        assertEquals(r1.intersect(s1), r1);
+        assertEquals(r1.intersect(s2), r1);
+        assertEquals(r2.intersect(s1), r2);
+        assertEquals(r2.intersect(s2), r2);
+
+        assertEquals(s1.intersect(r1), r1);
+        assertEquals(s1.intersect(r2), r2);
+        assertEquals(s2.intersect(r1), r1);
+        assertEquals(s2.intersect(r2), r2);
+
+        assertEquals(r2.union(s2).intersect(r1), r1);
+        assertEquals(r1.union(s1).intersect(r2), r2);
+        assertEquals(r1.intersect(r2.union(s2)), r1);
+        assertEquals(r2.intersect(r1.union(s1)), r2);
+
+        assertEquals(r1.union(s1).intersect(r2.union(s2)), r1.union(r2).union(s2));
+        assertEquals(r2.union(s2).intersect(r1.union(s1)), r1.union(r2).union(s1));
+    }
+
+    @Test
+    public void testPrefixAndSuffix()
+    {
+        SortedRangeSet sortedRangeSet = likePatterns("%123", "%456");
+        sortedRangeSet = likePatterns(sortedRangeSet, "abc%", "def%");
+        assertEquals(sortedRangeSet.getStringMatchers().getLikePatterns(), Sets.newHashSet("abc%", "def%", "%123", "%456"));
+        assertTrue(sortedRangeSet.getOrderedRanges().isEmpty());
+        assertFalse(sortedRangeSet.isNone());
+        assertFalse(sortedRangeSet.isAll());
+
+        SortedRangeSet suffixSet = likePatterns("%123", "%456");
+        SortedRangeSet prefixSet = likePatterns("abc%", "def%");
+        SortedRangeSet union = suffixSet.union(prefixSet);
+        assertEquals(sortedRangeSet.getStringMatchers().getLikePatterns(), Sets.newHashSet("abc%", "def%", "%123", "%456"));
+
+        assertEquals(union.intersect(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals((SortedRangeSet.all(VARCHAR).intersect(union)), SortedRangeSet.all(VARCHAR));
+
+        SortedRangeSet r1 = SortedRangeSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"));
+
+        SortedRangeSet expected = new SortedRangeSet.Builder(VARCHAR).addAll(r1.getOrderedRanges()).build();
+        SortedRangeSet intersect = union.intersect(r1);
+        assertEquals(expected, intersect);
+
+        r1 = SortedRangeSet.of(VARCHAR, utf8Slice("R1"));
+        SortedRangeSet r2 = SortedRangeSet.of(VARCHAR, utf8Slice("R2"));
+        SortedRangeSet s1 = likePatterns("%S1");
+        SortedRangeSet s2 = likePatterns("%S2");
+        SortedRangeSet p1 = likePatterns("P1%");
+        SortedRangeSet p2 = likePatterns("P2%");
+
+        SortedRangeSet actual = s1.union(r1).intersect(r2);
+        assertEquals(actual, r2);
+        actual = s1.union(p1).intersect(r2);
+        assertEquals(actual, r2);
+        actual = s1.union(r1).union(p1).intersect(r2);
+        assertEquals(actual, r2);
+        actual = p1.union(r1).intersect(r2);
+        assertEquals(actual, r2);
+
+        actual = s1.union(r1).intersect(s2);
+        assertEquals(actual, r1.union(s2));
+        actual = s1.union(p1).intersect(s2);
+        assertEquals(actual, s2);
+        actual = s1.union(r1).union(p1).intersect(s2);
+        assertEquals(actual, r1.union(s2));
+        actual = p1.union(r1).intersect(s2);
+        assertEquals(actual, r1.union(s2));
+
+        actual = s1.union(r1).intersect(p2);
+        assertEquals(actual, r1.union(p2));
+        actual = s1.union(p1).intersect(p2);
+        assertEquals(actual, p2);
+        actual = s1.union(r1).union(p1).intersect(p2);
+        assertEquals(actual, r1.union(p2));
+        actual = p1.union(r1).intersect(p2);
+        assertEquals(actual, p2.union(r1));
+
+        actual = s1.union(r1).intersect(s2.union(r2));
+        assertEquals(actual, r1.union(r2).union(s2));
+        actual = s1.union(p1).intersect(s2.union(r2));
+        assertEquals(actual, s2.union(r2));
+        actual = s1.union(r1).union(p1).intersect(s2.union(r2));
+        assertEquals(actual, s2.union(r1).union(r2));
+        actual = p1.union(r1).intersect(s2.union(r2));
+        assertEquals(actual, r2.union(r1).union(s2));
+
+        actual = s1.union(r1).intersect(s2.union(p2));
+        assertEquals(actual, r1.union(s1));
+        actual = s1.union(p1).intersect(s2.union(p2));
+        assertEquals(actual, s2.union(p2));
+        actual = s1.union(r1).union(p1).intersect(s2.union(p2));
+        assertEquals(actual, s2.union(r1).union(p2));
+        actual = p1.union(r1).intersect(s2.union(p2));
+        assertEquals(actual, p1.union(r1));
+
+        actual = s1.union(r1).intersect(s2.union(r2).union(p2));
+        assertEquals(actual, r1.union(r2).union(s1));
+        actual = s1.union(p1).intersect(s2.union(r2).union(p2));
+        assertEquals(actual, r2.union(p2).union(s2));
+        actual = s1.union(r1).union(p1).intersect(s2.union(r2).union(p2));
+        assertEquals(actual, r1.union(r2).union(s2).union(p2));
+        actual = p1.union(r1).intersect(s2.union(r2).union(p2));
+        assertEquals(actual, r1.union(r2).union(p1));
+
+        // Choose shorter prefix/suffix during intersection (as a heuristic):
+        actual = p1.union(p2).intersect(s1);
+        assertEquals(actual, s1);
+        actual = s1.intersect(p1.union(p2));
+        assertEquals(actual, s1);
+
+        actual = p1.union(p2).intersect(p1);
+        assertEquals(actual, p1);
+        actual = p1.intersect(p1.union(p2));
+        assertEquals(actual, p1);
+
+        actual = s1.union(s2).intersect(p1);
+        assertEquals(actual, p1);
+        actual = p1.intersect(s1.union(s2));
+        assertEquals(actual, p1);
+
+        actual = s1.union(s2).intersect(s1);
+        assertEquals(actual, s1);
+        actual = s1.intersect(s1.union(s2));
+        assertEquals(actual, s1);
+    }
+
+    @Test
+    public void testRegexpLike()
+    {
+        SortedRangeSet prefixes = regexLikePatterns("^12\\s3.*a$", "b+b.*", ".*a.*");
+        assertEquals(prefixes.getStringMatchers().getRegexpLikePatterns(), Sets.newHashSet("^12\\s3.*a$", "b+b.*", ".*a.*"));
+        assertTrue(prefixes.getOrderedRanges().isEmpty());
+        assertFalse(prefixes.isNone());
+        assertFalse(prefixes.isAll());
+
+        SortedRangeSet empty = regexLikePatterns();
+        assertTrue(empty.getStringMatchers().getRegexpLikePatterns().isEmpty());
+        assertTrue(empty.isNone());
+        assertFalse(prefixes.isAll());
+
+        assertEquals(regexLikePatterns(".*123.*").union(regexLikePatterns(".*456.*")).getStringMatchers().getRegexpLikePatterns(),
+                     Sets.newHashSet(".*123.*", ".*456.*"));
+        assertEquals(regexLikePatterns(".*123.*", ".*234.*").union(regexLikePatterns(".*234.*", ".*345.*")).getStringMatchers().getRegexpLikePatterns(),
+                     Sets.newHashSet(".*123.*", ".*234.*", ".*345.*"));
+
+        assertEquals(regexLikePatterns(".*123.*").union(SortedRangeSet.none(VARCHAR)), regexLikePatterns(".*123.*"));
+        assertEquals(regexLikePatterns(".*123.*").union(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).union(regexLikePatterns(".*123.*")), regexLikePatterns(".*123.*"));
+        assertEquals(SortedRangeSet.all(VARCHAR).union(regexLikePatterns(".*123.*")), SortedRangeSet.all(VARCHAR));
+
+        assertEquals(regexLikePatterns(".*123.*").intersect(SortedRangeSet.none(VARCHAR)), SortedRangeSet.none(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).intersect(regexLikePatterns(".*123.*")), SortedRangeSet.none(VARCHAR));
+        // Note: the following results are suboptimal.
+        assertEquals(regexLikePatterns(".*123.*").intersect(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.all(VARCHAR).intersect(regexLikePatterns(".*123.*")), SortedRangeSet.all(VARCHAR));
+
+        ValueSet r1 = ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"));
+        ValueSet r2 = ValueSet.of(VARCHAR, utf8Slice("b"), utf8Slice("c"));
+        ValueSet s1 = regexLikePatterns("x.*", "y.*");
+        ValueSet s2 = regexLikePatterns("y.*", "z.*");
+
+        assertEquals(s1.union(s2), regexLikePatterns("x.*", "y.*", "z.*"));
+        assertEquals(s2.union(s1), regexLikePatterns("x.*", "y.*", "z.*"));
+        assertEquals(s1.intersect(s2), s2);
+        assertEquals(s2.intersect(s1), s1);
+
+        assertEquals(r1.intersect(s1), r1);
+        assertEquals(r1.intersect(s2), r1);
+        assertEquals(r2.intersect(s1), r2);
+        assertEquals(r2.intersect(s2), r2);
+
+        assertEquals(s1.intersect(r1), r1);
+        assertEquals(s1.intersect(r2), r2);
+        assertEquals(s2.intersect(r1), r1);
+        assertEquals(s2.intersect(r2), r2);
+
+        assertEquals(r2.union(s2).intersect(r1), r1);
+        assertEquals(r1.union(s1).intersect(r2), r2);
+        assertEquals(r1.intersect(r2.union(s2)), r1);
+        assertEquals(r2.intersect(r1.union(s1)), r2);
+
+        assertEquals(r1.union(s1).intersect(r2.union(s2)), r1.union(r2).union(s2));
+        assertEquals(r2.union(s2).intersect(r1.union(s1)), r1.union(r2).union(s1));
+    }
+
+    @Test
+    public void testLikeAndRegexpLike()
+    {
+        SortedRangeSet likeAndRegexpLike = regexLikePatterns(".*123.*").union(likePatterns("%456%"));
+
+        assertEquals(likeAndRegexpLike.getStringMatchers().getRegexpLikePatterns(), Sets.newHashSet(".*123.*"));
+        assertEquals(likeAndRegexpLike.getStringMatchers().getLikePatterns(), Sets.newHashSet("%456%"));
+
+        assertEquals(likeAndRegexpLike.union(SortedRangeSet.none(VARCHAR)), likeAndRegexpLike);
+        assertEquals(likeAndRegexpLike.union(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).union(likeAndRegexpLike), likeAndRegexpLike);
+        assertEquals(SortedRangeSet.all(VARCHAR).union(likeAndRegexpLike), SortedRangeSet.all(VARCHAR));
+
+        assertEquals(likeAndRegexpLike.intersect(SortedRangeSet.none(VARCHAR)), SortedRangeSet.none(VARCHAR));
+        assertEquals(SortedRangeSet.none(VARCHAR).intersect(likeAndRegexpLike), SortedRangeSet.none(VARCHAR));
+        // Note: the following results are suboptimal.
+        assertEquals(likeAndRegexpLike.intersect(SortedRangeSet.all(VARCHAR)), SortedRangeSet.all(VARCHAR));
+        assertEquals(SortedRangeSet.all(VARCHAR).intersect(likeAndRegexpLike), SortedRangeSet.all(VARCHAR));
+
+        ValueSet r1 = ValueSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"));
+        ValueSet r2 = ValueSet.of(VARCHAR, utf8Slice("b"), utf8Slice("c"));
+        ValueSet s1 = regexLikePatterns(".*x.*", ".*y.*").union(likePatterns("%x%", "%y%"));
+        ValueSet s2 = regexLikePatterns(".*y.*", ".*z.*").union(likePatterns("%y%", "%z%"));
+        ValueSet expectedS1AndS2Union = regexLikePatterns(".*x.*", ".*y.*", ".*z.*").union(likePatterns("%x%", "%y%", "%z%"));
+
+        assertEquals(s1.union(s2), expectedS1AndS2Union);
+        assertEquals(s2.union(s1), expectedS1AndS2Union);
+        assertEquals(s1.intersect(s2), s2);
+        assertEquals(s2.intersect(s1), s1);
+
+        assertEquals(r2.intersect(s1), r2);
+        assertEquals(r2.intersect(s2), r2);
+
+        assertEquals(s1.intersect(r1), r1);
+        assertEquals(s1.intersect(r2), r2);
+        assertEquals(s2.intersect(r1), r1);
+        assertEquals(s2.intersect(r2), r2);
+
+        assertEquals(r2.union(s2).intersect(r1), r1);
+        assertEquals(r1.union(s1).intersect(r2), r2);
+        assertEquals(r1.intersect(r2.union(s2)), r1);
+        assertEquals(r2.intersect(r1.union(s1)), r2);
+
+        assertEquals(r1.union(s1).intersect(r2.union(s2)), r1.union(r2).union(s2));
+        assertEquals(r2.union(s2).intersect(r1.union(s1)), r1.union(r2).union(s1));
+    }
+
+    private SortedRangeSet likePatterns(SortedRangeSet sortedRangeSet, String... patterns)
+    {
+        SortedRangeSet result = sortedRangeSet;
+        for (String pattern : patterns) {
+            result = result.union(SortedRangeSet.ofLike(VARCHAR, pattern));
+        }
+        return result;
+    }
+
+    private SortedRangeSet likePatterns(String... patterns)
+    {
+        return likePatterns(SortedRangeSet.none(VARCHAR), patterns);
+    }
+
+    private SortedRangeSet regexLikePatterns(SortedRangeSet sortedRangeSet, String... patterns)
+    {
+        SortedRangeSet result = sortedRangeSet;
+        for (String pattern : patterns) {
+            result = result.union(SortedRangeSet.ofRegexpLike(VARCHAR, pattern));
+        }
+        return result;
+    }
+
+    private SortedRangeSet regexLikePatterns(String... patterns)
+    {
+        return regexLikePatterns(SortedRangeSet.none(VARCHAR), patterns);
     }
 
     private void assertUnion(SortedRangeSet first, SortedRangeSet second, SortedRangeSet expected)

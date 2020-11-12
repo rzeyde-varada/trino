@@ -167,7 +167,8 @@ public class PushPredicateIntoTableScan
                 typeOperators,
                 session,
                 deterministicPredicate,
-                types);
+                types,
+                metadata.supportsStringMatchingPushdown(session, node.getTable()));
 
         TupleDomain<ColumnHandle> newDomain = decomposedPredicate.getTupleDomain()
                 .transform(node.getAssignments()::get)

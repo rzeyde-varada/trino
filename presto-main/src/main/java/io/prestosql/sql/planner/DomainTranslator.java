@@ -60,6 +60,7 @@ import io.prestosql.sql.tree.NotExpression;
 import io.prestosql.sql.tree.NullLiteral;
 import io.prestosql.sql.tree.StringLiteral;
 import io.prestosql.sql.tree.SymbolReference;
+import io.prestosql.type.JoniRegexp;
 import io.prestosql.type.LikeFunctions;
 import io.prestosql.type.TypeCoercion;
 
@@ -89,6 +90,7 @@ import static io.prestosql.sql.ExpressionUtils.and;
 import static io.prestosql.sql.ExpressionUtils.combineConjuncts;
 import static io.prestosql.sql.ExpressionUtils.combineDisjunctsWithDefault;
 import static io.prestosql.sql.ExpressionUtils.or;
+import static io.prestosql.sql.planner.ExpressionInterpreter.expressionInterpreter;
 import static io.prestosql.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static io.prestosql.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.prestosql.sql.tree.ComparisonExpression.Operator.EQUAL;
@@ -315,7 +317,18 @@ public final class DomainTranslator
             Expression predicate,
             TypeProvider types)
     {
-        return new Visitor(metadata, typeOperators, session, types, new TypeAnalyzer(new SqlParser(), metadata)).process(predicate, false);
+        return new Visitor(metadata, typeOperators, session, types, new TypeAnalyzer(new SqlParser(), metadata), false).process(predicate, false);
+    }
+
+    public static ExtractionResult fromPredicate(
+            Metadata metadata,
+            TypeOperators typeOperators,
+            Session session,
+            Expression predicate,
+            TypeProvider types,
+            boolean supportStringMatchingPushdown)
+    {
+        return new Visitor(metadata, typeOperators, session, types, new TypeAnalyzer(new SqlParser(), metadata), supportStringMatchingPushdown).process(predicate, false);
     }
 
     private static class Visitor
@@ -329,8 +342,9 @@ public final class DomainTranslator
         private final InterpretedFunctionInvoker functionInvoker;
         private final TypeAnalyzer typeAnalyzer;
         private final TypeCoercion typeCoercion;
+        private final boolean supportStringMatchingPushdown;
 
-        private Visitor(Metadata metadata, TypeOperators typeOperators, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
+        private Visitor(Metadata metadata, TypeOperators typeOperators, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer, boolean supportStringMatchingPushdown)
         {
             this.metadata = requireNonNull(metadata, "metadata is null");
             this.literalEncoder = new LiteralEncoder(metadata);
@@ -340,6 +354,7 @@ public final class DomainTranslator
             this.functionInvoker = new InterpretedFunctionInvoker(metadata);
             this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
             this.typeCoercion = new TypeCoercion(metadata::getType);
+            this.supportStringMatchingPushdown = supportStringMatchingPushdown;
         }
 
         private Type checkedTypeLookup(Symbol symbol)
@@ -885,11 +900,36 @@ public final class DomainTranslator
         @Override
         protected ExtractionResult visitLikePredicate(LikePredicate node, Boolean complement)
         {
-            Optional<ExtractionResult> result = tryVisitLikePredicate(node, complement);
+            Optional<ExtractionResult> result = connectorVisitLikePredicate(node, complement);
+            if (result.isPresent()) {
+                return result.get();
+            }
+
+            result = tryVisitLikePredicate(node, complement);
             if (result.isPresent()) {
                 return result.get();
             }
             return super.visitLikePredicate(node, complement);
+        }
+
+        protected Optional<ExtractionResult> connectorVisitLikePredicate(LikePredicate node, Boolean complement)
+        {
+            if (supportStringMatchingPushdown &&
+                    !complement &&
+                    node.getValue() instanceof SymbolReference &&
+                    node.getPattern() instanceof StringLiteral &&
+                    node.getEscape().isEmpty()) {
+                // TODO: add escaping support
+                Symbol symbol = Symbol.from(node.getValue());
+                Type columnType = checkedTypeLookup(symbol);
+                StringLiteral patternLiteral = (StringLiteral) node.getPattern();
+                // Build a single "LIKE pattern" domain for this column.
+                Domain domain = Domain.ofLike(columnType, patternLiteral.getValue());
+                TupleDomain<Symbol> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(symbol, domain));
+                // Keep the original expression as-is in the predicate (since the connector may choose not to enforce LIKE patterns).
+                return Optional.of(new ExtractionResult(tupleDomain, node /* remainingExpression */));
+            }
+            return Optional.empty();
         }
 
         private Optional<ExtractionResult> tryVisitLikePredicate(LikePredicate node, Boolean complement)
@@ -952,8 +992,14 @@ public final class DomainTranslator
         protected ExtractionResult visitFunctionCall(FunctionCall node, Boolean complement)
         {
             String name = ResolvedFunction.extractFunctionName(node.getName());
+            Optional<ExtractionResult> result = connectorVisitFunctionCall(node, complement, name);
+
+            if (result.isPresent()) {
+                return result.get();
+            }
+
             if (name.equals("starts_with")) {
-                Optional<ExtractionResult> result = tryVisitStartsWithFunction(node, complement);
+                result = tryVisitStartsWithFunction(node, complement);
                 if (result.isPresent()) {
                     return result.get();
                 }
@@ -961,24 +1007,88 @@ public final class DomainTranslator
             return visitExpression(node, complement);
         }
 
-        private Optional<ExtractionResult> tryVisitStartsWithFunction(FunctionCall node, Boolean complement)
+        private Optional<ExtractionResult> connectorVisitFunctionCall(FunctionCall node, Boolean complement, String name)
+        {
+            if (supportStringMatchingPushdown &&
+                    !complement) {
+                if (name.equals("regexp_like")) {
+                    return connectorTryVisitRegexpLike(node);
+                }
+                if (name.equals("starts_with")) {
+                    return connectorTryVisitStartsWithFunction(node);
+                }
+            }
+            return Optional.empty();
+        }
+
+        private Optional<ExtractionResult> connectorTryVisitRegexpLike(FunctionCall node)
+        {
+            if (node.getArguments() != null
+                    && node.getArguments().size() == 2) {
+                Expression strExpression = node.getArguments().get(0);
+                if (!(strExpression instanceof SymbolReference)) {
+                    // Complex expressions pushdown is not supported
+                    return Optional.empty();
+                }
+                Expression pattern = node.getArguments().get(1);
+                if (!(pattern instanceof FunctionCall)) {
+                    return Optional.empty();
+                }
+                FunctionCall func = (FunctionCall) pattern;
+                Object object = expressionInterpreter(func, metadata, session, typeAnalyzer.getTypes(session, types, func)).evaluate();
+                if (!(object instanceof JoniRegexp)) {
+                    return Optional.empty();
+                }
+                JoniRegexp regexp = (JoniRegexp) object;
+                Symbol symbol = Symbol.from(strExpression);
+                Type columnType = checkedTypeLookup(symbol);
+                // Build a single "REGEXP LIKE pattern" domain for this column.
+                Domain domain = Domain.ofRegexpLike(columnType, regexp.pattern().toStringUtf8());
+                TupleDomain<Symbol> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(symbol, domain));
+                // Keep the original expression as-is in the predicate (since the connector may choose not to enforce REGEXP LIKE patterns).
+                return Optional.of(new ExtractionResult(tupleDomain, node /* remainingExpression */));
+            }
+            return Optional.empty();
+        }
+
+        private boolean shouldSkipConversion(List<Expression> args)
+        {
+            return (args.size() != 2) ||
+                    (!(args.get(0) instanceof SymbolReference)) ||
+                    (!(args.get(1) instanceof StringLiteral)) ||
+                    (((StringLiteral) args.get(1)).getValue().length() == 0);
+        }
+
+        private Optional<ExtractionResult> connectorTryVisitStartsWithFunction(FunctionCall node)
         {
             List<Expression> args = node.getArguments();
-            if (args.size() != 2) {
+
+            if (shouldSkipConversion(args)) {
                 return Optional.empty();
             }
 
             Expression target = args.get(0);
-            if (!(target instanceof SymbolReference)) {
-                // Target is not a symbol
+            Expression prefix = args.get(1);
+
+            Symbol symbol = Symbol.from(target);
+            Type columnType = checkedTypeLookup(symbol);
+            StringLiteral patternLiteral = (StringLiteral) prefix;
+            // Build a single "LIKE pattern" domain for this column.
+            Domain domain = Domain.ofLike(columnType, patternLiteral.getValue() + "%");
+            TupleDomain<Symbol> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(symbol, domain));
+            // Keep the original expression as-is in the predicate (since the connector may choose not to enforce REGEXP LIKE patterns).
+            return Optional.of(new ExtractionResult(tupleDomain, node /* remainingExpression */));
+        }
+
+        private Optional<ExtractionResult> tryVisitStartsWithFunction(FunctionCall node, Boolean complement)
+        {
+            List<Expression> args = node.getArguments();
+            if (shouldSkipConversion(args)) {
                 return Optional.empty();
             }
 
+            Expression target = args.get(0);
             Expression prefix = args.get(1);
-            if (!(prefix instanceof StringLiteral)) {
-                // dynamic pattern
-                return Optional.empty();
-            }
 
             Type type = typeAnalyzer.getType(session, types, target);
             if (!(type instanceof VarcharType)) {

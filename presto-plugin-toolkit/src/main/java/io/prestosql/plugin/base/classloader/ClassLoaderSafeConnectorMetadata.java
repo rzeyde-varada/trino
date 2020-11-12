@@ -799,6 +799,14 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
+    public boolean supportsStringMatchingPushdown(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.supportsStringMatchingPushdown(session, tableHandle);
+        }
+    }
+
+    @Override
     public void createMaterializedView(ConnectorSession session, SchemaTableName viewName, ConnectorMaterializedViewDefinition definition, boolean replace, boolean ignoreExisting)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {

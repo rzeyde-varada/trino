@@ -19,7 +19,12 @@ import io.prestosql.execution.QueryStats;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.operator.OperatorStats;
 import io.prestosql.spi.QueryId;
+import io.prestosql.spi.predicate.Domain;
+import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.sql.analyzer.FeaturesConfig;
+import io.prestosql.sql.planner.Plan;
+import io.prestosql.sql.planner.optimizations.PlanNodeSearcher;
+import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.testing.AbstractTestQueryFramework;
 import io.prestosql.testing.DistributedQueryRunner;
 import io.prestosql.testing.MaterializedResult;
@@ -35,6 +40,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.prestosql.SystemSessionProperties.ENABLE_LARGE_DYNAMIC_FILTERS;
 import static io.prestosql.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.prestosql.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.sql.analyzer.FeaturesConfig.JoinDistributionType.BROADCAST;
 import static io.prestosql.sql.analyzer.FeaturesConfig.JoinDistributionType.PARTITIONED;
 import static io.prestosql.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.NONE;
@@ -315,6 +321,32 @@ public class TestMemorySmoke
                 withBroadcastJoin(),
                 0,
                 ORDERS_COUNT, CUSTOMER_COUNT);
+    }
+
+    @Test
+    public void testRegexpLikePushdown()
+    {
+        ResultWithQueryId<MaterializedResult> result = getDistributedQueryRunner().executeWithQueryId(getSession(),
+                "SELECT custkey FROM customer WHERE regexp_like(name, '.*000001000')");
+        assertEquals(result.getResult().getRowCount(), 1);
+        Plan plan = getDistributedQueryRunner().getQueryPlan(result.getQueryId());
+        TableScanNode scanNode = PlanNodeSearcher.searchFrom(plan.getRoot()).where(node -> node instanceof TableScanNode).findOnlyElement();
+        MemoryTableHandle table = (MemoryTableHandle) scanNode.getTable().getConnectorHandle();
+        assertEquals(table.getPredicate(), TupleDomain.withColumnDomains(ImmutableMap.of(
+                new MemoryColumnHandle(1), Domain.ofRegexpLike(VARCHAR, ".*000001000"))));
+    }
+
+    @Test
+    public void testLikePushdown()
+    {
+        ResultWithQueryId<MaterializedResult> result = getDistributedQueryRunner().executeWithQueryId(getSession(),
+                "SELECT custkey FROM customer WHERE name LIKE '%000001000'");
+        assertEquals(result.getResult().getRowCount(), 1);
+        Plan plan = getDistributedQueryRunner().getQueryPlan(result.getQueryId());
+        TableScanNode scanNode = PlanNodeSearcher.searchFrom(plan.getRoot()).where(node -> node instanceof TableScanNode).findOnlyElement();
+        MemoryTableHandle table = (MemoryTableHandle) scanNode.getTable().getConnectorHandle();
+        assertEquals(table.getPredicate(), TupleDomain.withColumnDomains(ImmutableMap.of(
+                new MemoryColumnHandle(1), Domain.ofLike(VARCHAR, "%000001000"))));
     }
 
     private void assertDynamicFiltering(@Language("SQL") String selectQuery, Session session, int expectedRowCount, int... expectedOperatorRowsRead)

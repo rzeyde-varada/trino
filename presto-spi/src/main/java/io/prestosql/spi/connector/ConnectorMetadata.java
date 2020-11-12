@@ -1021,6 +1021,14 @@ public interface ConnectorMetadata
     default void validateScan(ConnectorSession session, ConnectorTableHandle handle) {}
 
     /**
+     * This connector supports LIKE patterns (may return more rows than necessary due to Presto post-filtering).
+     */
+    default boolean supportsStringMatchingPushdown(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return false;
+    }
+
+    /**
      * Create the specified materialized view. The view definition is intended to
      * be serialized by the connector for permanent storage.
      * @throws PrestoException with {@code ALREADY_EXISTS} if the object already exists and {@param ignoreExisting} is not set

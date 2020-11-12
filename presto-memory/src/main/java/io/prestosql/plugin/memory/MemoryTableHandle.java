@@ -16,6 +16,7 @@ package io.prestosql.plugin.memory;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.prestosql.spi.connector.ConnectorTableHandle;
+import io.prestosql.spi.predicate.TupleDomain;
 
 import java.util.Objects;
 import java.util.OptionalDouble;
@@ -29,6 +30,7 @@ public final class MemoryTableHandle
     private final long id;
     private final OptionalLong limit;
     private final OptionalDouble sampleRatio;
+    private final TupleDomain<MemoryColumnHandle> predicate;  // only for testing complex pushdowns, not used for filtering
 
     public MemoryTableHandle(long id)
     {
@@ -44,6 +46,19 @@ public final class MemoryTableHandle
         this.id = id;
         this.limit = requireNonNull(limit, "limit is null");
         this.sampleRatio = requireNonNull(sampleRatio, "sampleRatio is null");
+        this.predicate = TupleDomain.all();
+    }
+
+    public MemoryTableHandle(
+            long id,
+            OptionalLong limit,
+            OptionalDouble sampleRatio,
+            TupleDomain<MemoryColumnHandle> predicate)
+    {
+        this.id = id;
+        this.limit = requireNonNull(limit, "limit is null");
+        this.sampleRatio = requireNonNull(sampleRatio, "sampleRatio is null");
+        this.predicate = requireNonNull(predicate, "predicate is null");
     }
 
     @JsonProperty
@@ -62,6 +77,11 @@ public final class MemoryTableHandle
     public OptionalDouble getSampleRatio()
     {
         return sampleRatio;
+    }
+
+    public TupleDomain<MemoryColumnHandle> getPredicate()
+    {
+        return predicate;
     }
 
     @Override

@@ -393,6 +393,12 @@ public class MemoryMetadata
     }
 
     @Override
+    public boolean supportsStringMatchingPushdown(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return true;
+    }
+
+    @Override
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session, ConnectorTableHandle handle, long limit)
     {
         MemoryTableHandle table = (MemoryTableHandle) handle;

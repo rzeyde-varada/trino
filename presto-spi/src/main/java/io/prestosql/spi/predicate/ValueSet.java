@@ -85,7 +85,19 @@ public interface ValueSet
 
     static ValueSet copyOfRanges(Type type, Collection<Range> ranges)
     {
-        return SortedRangeSet.copyOf(type, ranges);
+        return SortedRangeSet.copyOf(type, ranges, StringMatchers.empty());
+    }
+
+    static ValueSet ofLike(Type type, String pattern)
+    {
+        // HACK: side-channel for passing LIKE patterns to connectors.
+        return SortedRangeSet.ofLike(type, pattern);
+    }
+
+    static ValueSet ofRegexpLike(Type type, String pattern)
+    {
+        // HACK: side-channel for passing REGEXP LIKE patterns to connectors.
+        return SortedRangeSet.ofRegexpLike(type, pattern);
     }
 
     Type getType();

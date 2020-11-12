@@ -2076,6 +2076,14 @@ public final class MetadataManager
         return new InternalBlockEncodingSerde(this::getBlockEncoding, this::getType);
     }
 
+    public boolean supportsStringMatchingPushdown(Session session, TableHandle tableHandle)
+    {
+        CatalogName catalogName = tableHandle.getCatalogName();
+        CatalogMetadata catalogMetadata = getCatalogMetadata(session, catalogName);
+        ConnectorMetadata metadata = catalogMetadata.getMetadataFor(catalogName);
+        return metadata.supportsStringMatchingPushdown(session.toConnectorSession(catalogName), tableHandle.getConnectorHandle());
+    }
+
     public void addBlockEncoding(BlockEncoding blockEncoding)
     {
         requireNonNull(blockEncoding, "blockEncoding is null");

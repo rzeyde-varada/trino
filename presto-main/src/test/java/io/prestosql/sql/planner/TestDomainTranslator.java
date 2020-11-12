@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.io.BaseEncoding;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.prestosql.Session;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.security.AllowAllAccessControl;
 import io.prestosql.spi.predicate.Domain;
@@ -48,6 +49,8 @@ import io.prestosql.sql.tree.NullLiteral;
 import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.sql.tree.StringLiteral;
 import io.prestosql.transaction.TestingTransactionManager;
+import io.prestosql.transaction.TransactionId;
+import io.prestosql.type.JoniRegexp;
 import io.prestosql.type.TypeCoercion;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -64,6 +67,7 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
+import static io.prestosql.operator.scalar.JoniRegexpCasts.joniRegexp;
 import static io.prestosql.spi.predicate.TupleDomain.withColumnDomains;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
@@ -96,6 +100,7 @@ import static io.prestosql.sql.tree.ComparisonExpression.Operator.NOT_EQUAL;
 import static io.prestosql.testing.TestingConnectorSession.SESSION;
 import static io.prestosql.transaction.TransactionBuilder.transaction;
 import static io.prestosql.type.ColorType.COLOR;
+import static io.prestosql.type.JoniRegexpType.JONI_REGEXP;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
@@ -1639,6 +1644,497 @@ public class TestDomainTranslator
         assertUnsupportedPredicate(equal(cast(C_CHAR, charType), cast(stringLiteral("abc12345678"), charType)));
     }
 
+    @Test
+    public void testSuffixPushdown()
+    {
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%z"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%z"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%%z"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%%z"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%%%z"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%%%z"))));
+        // Union the suffix lists (in case of OR)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(like(C_VARCHAR, "%x"),
+                        like(C_VARCHAR, "%y")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%x").union(Domain.ofLike(VARCHAR, "%y")))));
+        // Choose the shorter suffix list (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "%z"),
+                        or(like(C_VARCHAR, "%x"),
+                                like(C_VARCHAR, "%y"))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%z"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(or(like(C_VARCHAR, "%x"),
+                        like(C_VARCHAR, "%y")),
+                        like(C_VARCHAR, "%z")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%z"))));
+        // Choose one of the suffixes (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "%x"),
+                        like(C_VARCHAR, "%y")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%y"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "%y"),
+                        like(C_VARCHAR, "%x")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%x"))));
+        // Choose the range expression (the one without the suffix) in case of AND (as a heuristic):
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "%x"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "%x"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                        like(C_VARCHAR, "%x")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "%x"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "%x"),
+                        greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                like(C_VARCHAR, "%x"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                        like(C_VARCHAR, "%x")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                like(C_VARCHAR, "%x"));
+        // Pushdown multiple '%' wildcards.
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%x%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%x%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%x%y"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%x%y"))));
+        // Non-ASCII is pushed down (for now)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%αβ"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%αβ"))));
+        // Pushdown '_' wildcard
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%a_c"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%a_c"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_abc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_abc"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "__abc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "__abc"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_%abc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_%abc"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%_abc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%_abc"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%a_bc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%a_bc"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_a%bc"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_a%bc"))));
+        // Only wildcards
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_%"))));
+
+        // No full support for NOT()
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(like(C_VARCHAR, "%abc")),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(and(like(C_VARCHAR, "%x"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(and(like(C_VARCHAR, "%x"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "%x"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(or(like(C_VARCHAR, "%x"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                Domain.singleValue(VARCHAR, utf8Slice("abc"))
+                                        .union(Domain.ofLike(VARCHAR, "%x")))),
+                or(like(C_VARCHAR, "%x"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(
+                        not(like(C_VARCHAR, "%x")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        not(like(C_VARCHAR, "%x")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                not(like(C_VARCHAR, "%x")));
+
+        // Handle also other columns:
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        like(C_VARCHAR, "%x"),
+                        equal(C_BIGINT.toSymbolReference(), bigintLiteral(7L))),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        C_VARCHAR, Domain.ofLike(VARCHAR, "%x"),
+                        C_BIGINT, Domain.singleValue(BIGINT, 7L))),
+                like(C_VARCHAR, "%x"));
+    }
+
+    @Test
+    public void testPrefixPushdown()
+    {
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "z%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "z%%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "z%%%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%%%"))));
+        // Union the prefix lists (in case of OR)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(like(C_VARCHAR, "x%"),
+                        like(C_VARCHAR, "y%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "x%").union(Domain.ofLike(VARCHAR, "y%")))));
+        // Choose the shorter prefix list (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "z%"),
+                        or(like(C_VARCHAR, "x%"),
+                                like(C_VARCHAR, "y%"))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(or(like(C_VARCHAR, "x%"),
+                        like(C_VARCHAR, "y%")),
+                        like(C_VARCHAR, "z%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%"))));
+        // Choose one of the prefixes (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "x%"),
+                        like(C_VARCHAR, "y%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "y%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "y%"),
+                        like(C_VARCHAR, "x%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "x%"))));
+        // Choose the range expression (the one without the prefix) in case of AND (as a heuristic):
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "x%"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "x%"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                        like(C_VARCHAR, "x%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "x%"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "x%"),
+                        greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                like(C_VARCHAR, "x%"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                        like(C_VARCHAR, "x%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                like(C_VARCHAR, "x%"));
+        // Pushdown multiple '%' wildcards.
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%x%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%x%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "y%x%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "y%x%"))));
+        // Non-ASCII is also pushed down (for now)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "αβ%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "αβ%"))));
+        // Pushdown '_' wildcard
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "c_a%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "c_a%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "abc_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "abc__"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc__"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "abc_%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc_%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "abc%_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc%_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "bc_a%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "bc_a%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "bc_a%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "bc_a%"))));
+        // Only wildcards
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "_%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_%"))));
+
+        // No full support for NOT()
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(like(C_VARCHAR, "abc%")),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(and(like(C_VARCHAR, "x%"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(and(like(C_VARCHAR, "x%"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                like(C_VARCHAR, "x%"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(or(like(C_VARCHAR, "x%"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                Domain.singleValue(VARCHAR, utf8Slice("abc"))
+                                        .union(Domain.ofLike(VARCHAR, "x%")))),
+                or(like(C_VARCHAR, "x%"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(
+                        not(like(C_VARCHAR, "x%")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        not(like(C_VARCHAR, "x%")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                not(like(C_VARCHAR, "x%")));
+
+        // Handle also other columns:
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        like(C_VARCHAR, "x%"),
+                        equal(C_BIGINT.toSymbolReference(), bigintLiteral(7L))),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        C_VARCHAR, Domain.ofLike(VARCHAR, "x%"),
+                        C_BIGINT, Domain.singleValue(BIGINT, 7L))),
+                like(C_VARCHAR, "x%"));
+    }
+
+    @Test
+    public void testStartsWithPushdown()
+    {
+        // constant
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                startsWith(C_VARCHAR, stringLiteral("abc")),
+                TupleDomain.withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc%"))),
+                startsWith(C_VARCHAR, stringLiteral("abc")));
+
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                startsWith(C_VARCHAR, stringLiteral("_abc")),
+                TupleDomain.withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "_abc%"))),
+                startsWith(C_VARCHAR, stringLiteral("_abc")));
+
+        // empty
+        assertUnsuportedPredicateStringMatchingPushdown(startsWith(C_VARCHAR, stringLiteral("")));
+        // complement
+        assertUnsuportedPredicateStringMatchingPushdown(not(startsWith(C_VARCHAR, stringLiteral("abc"))));
+
+        // non-ASCII
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                startsWith(C_VARCHAR, stringLiteral("abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0")),
+                TupleDomain.withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0%"))),
+                startsWith(C_VARCHAR, stringLiteral("abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0")));
+    }
+
+    @Test
+    public void testPrefixAndSuffixPushdown()
+    {
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "w%x%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "w%x%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "w_x_"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "w_x_"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%w%x"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%w%x"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "w%x"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "w%x"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                like(C_VARCHAR, "%w%x%"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "%w%x%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        like(C_VARCHAR, "%123"),
+                        new ComparisonExpression(GREATER_THAN, C_VARCHAR.toSymbolReference(), cast(stringLiteral("x"), VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("x"))), false))),
+                like(C_VARCHAR, "%123"));
+    }
+
+    @Test
+    public void testRegexpLikePushdown()
+    {
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                regexpLike(C_VARCHAR, ".*z.*"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, ".*z.*"))));
+
+        // Union the regex lists (in case of OR)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(regexpLike(C_VARCHAR, "x.*"),
+                   regexpLike(C_VARCHAR, "y.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "x.*").union(Domain.ofRegexpLike(VARCHAR, "y.*")))));
+
+        // Choose the shorter regex list (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "z.*"),
+                    or(regexpLike(C_VARCHAR, "x.*"),
+                       regexpLike(C_VARCHAR, "y.*"))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "z.*"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(or(regexpLike(C_VARCHAR, "x.*"),
+                       regexpLike(C_VARCHAR, "y.*")),
+                    regexpLike(C_VARCHAR, "z.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "z.*"))));
+        // Choose one of the regexes (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "x.*"),
+                    regexpLike(C_VARCHAR, "y.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "y.*"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "y.*"),
+                    regexpLike(C_VARCHAR, "x.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "x.*"))));
+        // Choose the range expression (the one without the regex) in case of AND (as a heuristic):
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "x.*"),
+                    equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                regexpLike(C_VARCHAR, "x.*"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                    regexpLike(C_VARCHAR, "x.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                regexpLike(C_VARCHAR, "x.*"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "x.*"),
+                    greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                regexpLike(C_VARCHAR, "x.*"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(greaterThan(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)),
+                    regexpLike(C_VARCHAR, "x.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("abc"))), false))),
+                regexpLike(C_VARCHAR, "x.*"));
+        // Non-ASCII is also pushed down
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                regexpLike(C_VARCHAR, "αβ.*"),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "αβ.*"))));
+        // No full support for NOT()
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(regexpLike(C_VARCHAR, "abc.*")),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(and(regexpLike(C_VARCHAR, "x.*"),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR)))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(and(regexpLike(C_VARCHAR, "x.*"),
+                            equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                regexpLike(C_VARCHAR, "x.*"));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                not(not(or(regexpLike(C_VARCHAR, "x.*"),
+                           equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                        Domain.singleValue(VARCHAR, utf8Slice("abc"))
+                                              .union(Domain.ofRegexpLike(VARCHAR, "x.*")))),
+                or(regexpLike(C_VARCHAR, "x.*"),
+                   equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(
+                        not(regexpLike(C_VARCHAR, "x.*")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                TupleDomain.all());
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        not(regexpLike(C_VARCHAR, "x.*")),
+                        equal(C_VARCHAR.toSymbolReference(), stringLiteral("abc", VARCHAR))),
+                withColumnDomains(
+                        ImmutableMap.of(C_VARCHAR,
+                                        Domain.singleValue(VARCHAR, utf8Slice("abc")))),
+                not(regexpLike(C_VARCHAR, "x.*")));
+
+        // Handle also other columns:
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(
+                        regexpLike(C_VARCHAR, "x.*"),
+                        equal(C_BIGINT.toSymbolReference(), bigintLiteral(7L))),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "x.*"),
+                        C_BIGINT, Domain.singleValue(BIGINT, 7L))),
+                regexpLike(C_VARCHAR, "x.*"));
+    }
+
+    @Test
+    public void testLikeAndRegexpLikePushdown()
+    {
+        // Union the lists (in case of OR)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                or(like(C_VARCHAR, "x%"),
+                   regexpLike(C_VARCHAR, "y.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "x%").union(Domain.ofRegexpLike(VARCHAR, "y.*")))));
+        // Choose the shorter list (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "z%"),
+                    or(regexpLike(C_VARCHAR, "x.*"),
+                       regexpLike(C_VARCHAR, "y.*"))),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "z%"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(or(like(C_VARCHAR, "x%"),
+                       like(C_VARCHAR, "y%")),
+                    regexpLike(C_VARCHAR, "z.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "z.*"))));
+        // Choose one of the patterns (in case of AND)
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(like(C_VARCHAR, "x%"),
+                    regexpLike(C_VARCHAR, "y.*")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofRegexpLike(VARCHAR, "y.*"))));
+        assertPredicateTranslatesWithStringMatchingPushdown(
+                and(regexpLike(C_VARCHAR, "y.*"),
+                    like(C_VARCHAR, "x%")),
+                withColumnDomains(ImmutableMap.of(C_VARCHAR, Domain.ofLike(VARCHAR, "x%"))));
+    }
+
     private void assertPredicateIsAlwaysTrue(Expression expression)
     {
         assertPredicateTranslates(expression, TupleDomain.all());
@@ -1671,6 +2167,27 @@ public class TestDomainTranslator
         assertNotEquals(result.getRemainingExpression(), TRUE_LITERAL);
     }
 
+    private void assertPredicateTranslatesWithStringMatchingPushdown(Expression original, TupleDomain<Symbol> tupleDomain)
+    {
+        assertPredicateTranslatesWithStringMatchingPushdown(original, tupleDomain, original);
+    }
+
+    private void assertPredicateTranslatesWithStringMatchingPushdown(Expression original, TupleDomain<Symbol> tupleDomain, Expression remaining)
+    {
+        ExtractionResult result = fromPredicateWithStringMatchingPushdown(original);
+        assertEquals(result.getTupleDomain(), tupleDomain, format("Different TupleDomain: %s != %s",
+                result.getTupleDomain().toString(TEST_SESSION.toConnectorSession()),
+                tupleDomain.toString(TEST_SESSION.toConnectorSession())));
+        assertEquals(result.getRemainingExpression(), remaining, "Different Remaining:\n");
+    }
+
+    private void assertUnsuportedPredicateStringMatchingPushdown(Expression original)
+    {
+        ExtractionResult result = fromPredicateWithStringMatchingPushdown(original);
+        assertEquals(result.getRemainingExpression(), original);
+        assertEquals(result.getTupleDomain(), TupleDomain.all());
+    }
+
     private ExtractionResult fromPredicate(Expression originalPredicate)
     {
         return transaction(new TestingTransactionManager(), new AllowAllAccessControl())
@@ -1678,6 +2195,12 @@ public class TestDomainTranslator
                 .execute(TEST_SESSION, transactionSession -> {
                     return DomainTranslator.fromPredicate(metadata, typeOperators, transactionSession, originalPredicate, TYPES);
                 });
+    }
+
+    private ExtractionResult fromPredicateWithStringMatchingPushdown(Expression originalPredicate)
+    {
+        Session session = Session.builder(TEST_SESSION).setTransactionId(TransactionId.create()).build();
+        return DomainTranslator.fromPredicate(metadata, typeOperators, session, originalPredicate, TYPES, true);
     }
 
     private Expression toPredicate(TupleDomain<Symbol> tupleDomain)
@@ -1838,6 +2361,23 @@ public class TestDomainTranslator
     private static ComparisonExpression comparison(ComparisonExpression.Operator operator, Expression expression1, Expression expression2)
     {
         return new ComparisonExpression(operator, expression1, expression2);
+    }
+
+    private static Expression like(Symbol symbol, String pattern)
+    {
+        return new LikePredicate(symbol.toSymbolReference(), new StringLiteral(pattern), Optional.empty());
+    }
+
+    private Expression regexpLike(Symbol symbol, String pattern)
+    {
+        LiteralEncoder encoder = new LiteralEncoder(metadata);
+        JoniRegexp regexp = joniRegexp(utf8Slice(pattern));
+        Expression expression = encoder.toExpression(regexp, JONI_REGEXP);
+        return new FunctionCallBuilder(metadata)
+                .setName(QualifiedName.of("regexp_like"))
+                .addArgument(VARCHAR, symbol.toSymbolReference())
+                .addArgument(JONI_REGEXP, expression)
+                .build();
     }
 
     private static Literal bigintLiteral(long value)

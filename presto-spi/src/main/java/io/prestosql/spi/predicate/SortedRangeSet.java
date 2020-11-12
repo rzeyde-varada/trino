@@ -16,7 +16,9 @@ package io.prestosql.spi.predicate;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.prestosql.spi.connector.ConnectorSession;
+import io.prestosql.spi.type.CharType;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.VarcharType;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -50,7 +52,11 @@ public final class SortedRangeSet
     private final Type type;
     private final NavigableMap<Marker, Range> lowIndexedRanges;
 
-    private SortedRangeSet(Type type, NavigableMap<Marker, Range> lowIndexedRanges)
+    // HACK: side-channel for passing LIKE patterns to connectors as an optimization (i.e. "hint").
+    // Semantically, it's OR-ed together with the existing ranges of this class.
+    private final StringMatchers stringMatchers;
+
+    private SortedRangeSet(Type type, NavigableMap<Marker, Range> lowIndexedRanges, StringMatchers stringMatchers)
     {
         requireNonNull(type, "type is null");
         requireNonNull(lowIndexedRanges, "lowIndexedRanges is null");
@@ -60,6 +66,7 @@ public final class SortedRangeSet
         }
         this.type = type;
         this.lowIndexedRanges = lowIndexedRanges;
+        this.stringMatchers = isAll() ? StringMatchers.empty() : stringMatchers;
     }
 
     static SortedRangeSet none(Type type)
@@ -99,17 +106,47 @@ public final class SortedRangeSet
     /**
      * Provided Ranges are unioned together to form the SortedRangeSet
      */
+    static SortedRangeSet copyOf(Type type, Iterable<Range> ranges, StringMatchers stringMatchers)
+    {
+        return new Builder(type).addAll(ranges)
+                .addStringMatchers(stringMatchers)
+                .build();
+    }
+
     static SortedRangeSet copyOf(Type type, Iterable<Range> ranges)
     {
         return new Builder(type).addAll(ranges).build();
     }
 
+    static SortedRangeSet ofLike(Type type, String likePattern)
+    {
+        // HACK: side-channel for passing LIKE patterns to connectors.
+        // It has no ranges, so it's almost a "NONE", except the LIKE and REGEXP LIKE patterns from DomainTranslator#fromPredicate.
+        // TODO: if this pattern cannot be optimized, it should be handled as ALL (i.e. full scan).
+        StringMatchers stringMatchers = StringMatchers.builder().addLikePatterns(likePattern).build();
+        return new Builder(type).addStringMatchers(stringMatchers).build();
+    }
+
+    static SortedRangeSet ofRegexpLike(Type type, String regexpLikePattern)
+    {
+        // HACK: side-channel for passing REGEXP LIKE patterns to connectors.
+        // It has no ranges, so it's almost a "NONE", except the LIKE and REGEXP LIKE patterns from DomainTranslator#fromPredicate.
+        StringMatchers stringMatchers = StringMatchers.builder().addRegexpLikePatterns(regexpLikePattern).build();
+        return new Builder(type).addStringMatchers(stringMatchers).build();
+    }
+
     @JsonCreator
     public static SortedRangeSet copyOf(
             @JsonProperty("type") Type type,
-            @JsonProperty("ranges") List<Range> ranges)
+            @JsonProperty("ranges") List<Range> ranges,
+            @JsonProperty("stringMatchers") StringMatchers stringMatchers)
     {
-        return copyOf(type, (Iterable<Range>) ranges);
+        return copyOf(type, (Iterable<Range>) ranges, stringMatchers);
+    }
+
+    public static SortedRangeSet copyOf(Type type, List<Range> ranges)
+    {
+        return copyOf(type, (Iterable<Range>) ranges, StringMatchers.empty());
     }
 
     @Override
@@ -125,6 +162,12 @@ public final class SortedRangeSet
         return new ArrayList<>(lowIndexedRanges.values());
     }
 
+    @JsonProperty("stringMatchers")
+    public StringMatchers getStringMatchers()
+    {
+        return StringMatchers.builder().add(stringMatchers).build();
+    }
+
     public int getRangeCount()
     {
         return lowIndexedRanges.size();
@@ -133,7 +176,7 @@ public final class SortedRangeSet
     @Override
     public boolean isNone()
     {
-        return lowIndexedRanges.isEmpty();
+        return lowIndexedRanges.isEmpty() && stringMatchers.isEmpty();
     }
 
     @Override
@@ -145,7 +188,7 @@ public final class SortedRangeSet
     @Override
     public boolean isSingleValue()
     {
-        return lowIndexedRanges.size() == 1 && lowIndexedRanges.values().iterator().next().isSingleValue();
+        return stringMatchers.isEmpty() && lowIndexedRanges.size() == 1 && lowIndexedRanges.values().iterator().next().isSingleValue();
     }
 
     @Override
@@ -259,6 +302,11 @@ public final class SortedRangeSet
         Iterator<Range> iterator1 = lowIndexedRanges.values().iterator();
         Iterator<Range> iterator2 = otherRangeSet.lowIndexedRanges.values().iterator();
 
+        // this = (Ranges1 + Likes1), other = (Ranges2 + Likes2)
+        // + -> UNION
+        // * -> INTERSECTION
+
+        // this * other =   Ranges1*Ranges2 + Ranges1*Likes2 + Likes1*Ranges2 + Likes1*Likes2
         if (iterator1.hasNext() && iterator2.hasNext()) {
             Range range1 = iterator1.next();
             Range range2 = iterator2.next();
@@ -282,6 +330,18 @@ public final class SortedRangeSet
                 }
             }
         }
+
+        // Likes1 * Ranges2 <= Ranges2 (if Likes1 non-empty)
+        if (!this.getStringMatchers().isEmpty()) {
+            builder.addAll(otherRangeSet.getOrderedRanges());
+        }
+
+        // Likes2 * Ranges1 <= Ranges1 (if Likes2 non-empty)
+        if (!otherRangeSet.getStringMatchers().isEmpty()) {
+            builder.addAll(this.getOrderedRanges());
+        }
+
+        builder.addStringMatchers(this.stringMatchers.intersect(otherRangeSet.stringMatchers));
 
         return builder.build();
     }
@@ -328,6 +388,8 @@ public final class SortedRangeSet
         return new Builder(type)
                 .addAll(this.lowIndexedRanges.values())
                 .addAll(otherRangeSet.lowIndexedRanges.values())
+                .addStringMatchers(this.getStringMatchers())
+                .addStringMatchers(otherRangeSet.getStringMatchers())
                 .build();
     }
 
@@ -335,9 +397,12 @@ public final class SortedRangeSet
     public SortedRangeSet union(Collection<ValueSet> valueSets)
     {
         Builder builder = new Builder(type);
-        builder.addAll(this.lowIndexedRanges.values());
+        builder.addAll(this.getOrderedRanges())
+                .addStringMatchers(this.getStringMatchers());
         for (ValueSet valueSet : valueSets) {
-            builder.addAll(checkCompatibility(valueSet).lowIndexedRanges.values());
+            SortedRangeSet otherRangeSet = checkCompatibility(valueSet);
+            builder.addAll(otherRangeSet.getOrderedRanges());
+            builder.addStringMatchers(otherRangeSet.getStringMatchers());
         }
         return builder.build();
     }
@@ -345,6 +410,10 @@ public final class SortedRangeSet
     @Override
     public SortedRangeSet complement()
     {
+        if (!stringMatchers.isEmpty()) {
+            throw new AssertionError("Complementing LIKE / REGEXP LIKE patterns is not supported: " + stringMatchers);
+        }
+
         Builder builder = new Builder(type);
 
         if (lowIndexedRanges.isEmpty()) {
@@ -398,7 +467,7 @@ public final class SortedRangeSet
     @Override
     public int hashCode()
     {
-        return Objects.hash(lowIndexedRanges);
+        return Objects.hash(lowIndexedRanges, stringMatchers);
     }
 
     @Override
@@ -411,7 +480,8 @@ public final class SortedRangeSet
             return false;
         }
         SortedRangeSet other = (SortedRangeSet) obj;
-        return Objects.equals(this.lowIndexedRanges, other.lowIndexedRanges);
+        return Objects.equals(this.lowIndexedRanges, other.lowIndexedRanges)
+                && Objects.equals(this.stringMatchers, other.stringMatchers);
     }
 
     @Override
@@ -423,15 +493,17 @@ public final class SortedRangeSet
     @Override
     public String toString(ConnectorSession session)
     {
-        return "[" + lowIndexedRanges.values().stream()
-                .map(range -> range.toString(session))
-                .collect(Collectors.joining(", ")) + "]";
+        String rangesStr = lowIndexedRanges.values().stream()
+                                           .map(range -> range.toString(session))
+                                           .collect(Collectors.joining(", "));
+        return String.format("[%s, %s]", rangesStr, stringMatchers.toString());
     }
 
     static class Builder
     {
         private final Type type;
         private final List<Range> ranges = new ArrayList<>();
+        private final StringMatchers.Builder stringMatchersBuilder = StringMatchers.builder();
 
         Builder(Type type)
         {
@@ -450,6 +522,17 @@ public final class SortedRangeSet
             }
 
             ranges.add(range);
+            return this;
+        }
+
+        Builder addStringMatchers(StringMatchers stringMatchers)
+        {
+            if (!stringMatchers.isEmpty()) {
+                if (!(type instanceof CharType || type instanceof VarcharType)) {
+                    throw new IllegalArgumentException(format("string matching pushdown not supported for %s", type));
+                }
+                stringMatchersBuilder.add(stringMatchers);
+            }
             return this;
         }
 
@@ -487,7 +570,7 @@ public final class SortedRangeSet
                 result.put(current.getLow(), current);
             }
 
-            return new SortedRangeSet(type, result);
+            return new SortedRangeSet(type, result, stringMatchersBuilder.build());
         }
     }
 }

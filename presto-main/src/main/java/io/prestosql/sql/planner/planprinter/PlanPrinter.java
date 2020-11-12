@@ -35,6 +35,8 @@ import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.Marker;
 import io.prestosql.spi.predicate.NullableValue;
 import io.prestosql.spi.predicate.Range;
+import io.prestosql.spi.predicate.SortedRangeSet;
+import io.prestosql.spi.predicate.StringMatchers;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.statistics.ColumnStatisticMetadata;
 import io.prestosql.spi.statistics.TableStatisticType;
@@ -1238,6 +1240,10 @@ public class PlanPrinter
                                 builder.append((range.getHigh().getBound() == Marker.Bound.EXACTLY) ? ']' : ')');
                             }
                             parts.add(builder.toString());
+                        }
+                        StringMatchers stringMatchers = ((SortedRangeSet) domain.getValues()).getStringMatchers();
+                        if (!stringMatchers.isEmpty()) {
+                            parts.add(stringMatchers.toString());
                         }
                     },
                     discreteValues -> discreteValues.getValues().stream()

@@ -571,6 +571,11 @@ public interface Metadata
 
     AnalyzePropertyManager getAnalyzePropertyManager();
 
+    default boolean supportsStringMatchingPushdown(Session session, TableHandle table)
+    {
+        return false;
+    }
+
     /**
      * Creates the specified materialized view with the specified view definition.
      */
