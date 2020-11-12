@@ -37,6 +37,7 @@ import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordPageSource;
 import io.trino.spi.connector.UpdatablePageSource;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.type.Type;
 import io.trino.split.EmptySplit;
 import io.trino.split.PageSourceProvider;
@@ -76,6 +77,7 @@ public class ScanFilterAndProjectOperator
     private long physicalBytes;
     private long readTimeNanos;
     private long dynamicFilterSplitsProcessed;
+    private Metrics metrics = Metrics.EMPTY;
 
     private ScanFilterAndProjectOperator(
             Session session,
@@ -158,6 +160,12 @@ public class ScanFilterAndProjectOperator
     }
 
     @Override
+    public Metrics getConnectorMetrics()
+    {
+        return metrics;
+    }
+
+    @Override
     public WorkProcessor<Page> getOutputPages()
     {
         return pages;
@@ -169,6 +177,7 @@ public class ScanFilterAndProjectOperator
         if (pageSource != null) {
             try {
                 pageSource.close();
+                metrics = pageSource.getMetrics();
             }
             catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -391,6 +400,7 @@ public class ScanFilterAndProjectOperator
             processedPositions += page.getPositionCount();
             physicalBytes = pageSource.getCompletedBytes();
             readTimeNanos = pageSource.getReadTimeNanos();
+            metrics = pageSource.getMetrics();
 
             return ProcessState.ofResult(page);
         }

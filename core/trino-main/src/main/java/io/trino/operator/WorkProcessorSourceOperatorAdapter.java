@@ -20,6 +20,7 @@ import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.spi.Page;
 import io.trino.spi.connector.UpdatablePageSource;
+import io.trino.spi.metrics.Metrics;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.ArrayList;
@@ -52,6 +53,7 @@ public class WorkProcessorSourceOperatorAdapter
     private long previousInputPositions;
     private long previousReadTimeNanos;
     private long previousDynamicFilterSplitsProcessed;
+    private Metrics previousMetrics = Metrics.EMPTY;
 
     public interface AdapterWorkProcessorSourceOperatorFactory
             extends WorkProcessorSourceOperatorFactory
@@ -175,6 +177,7 @@ public class WorkProcessorSourceOperatorAdapter
             throws Exception
     {
         sourceOperator.close();
+        operatorContext.setCustomMetrics(sourceOperator.getConnectorMetrics());
     }
 
     private void updateOperatorStats()
@@ -190,6 +193,7 @@ public class WorkProcessorSourceOperatorAdapter
         long currentInputPositions = sourceOperator.getInputPositions();
 
         long currentDynamicFilterSplitsProcessed = sourceOperator.getDynamicFilterSplitsProcessed();
+        Metrics currentMetrics = sourceOperator.getConnectorMetrics();
 
         if (currentPhysicalInputBytes != previousPhysicalInputBytes
                 || currentPhysicalInputPositions != previousPhysicalInputPositions
@@ -227,6 +231,11 @@ public class WorkProcessorSourceOperatorAdapter
         if (currentDynamicFilterSplitsProcessed != previousDynamicFilterSplitsProcessed) {
             operatorContext.recordDynamicFilterSplitProcessed(currentDynamicFilterSplitsProcessed - previousDynamicFilterSplitsProcessed);
             previousDynamicFilterSplitsProcessed = currentDynamicFilterSplitsProcessed;
+        }
+
+        if (!currentMetrics.equals(previousMetrics)) {
+            operatorContext.setCustomMetrics(currentMetrics);
+            previousMetrics = currentMetrics;
         }
     }
 

@@ -20,6 +20,10 @@ import io.trino.execution.QueryStats;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.operator.OperatorStats;
 import io.trino.spi.QueryId;
+import io.trino.spi.metrics.Count;
+import io.trino.spi.metrics.Histogram;
+import io.trino.spi.metrics.Metric;
+import io.trino.spi.metrics.Metrics;
 import io.trino.sql.analyzer.FeaturesConfig;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
@@ -32,8 +36,11 @@ import org.intellij.lang.annotations.Language;
 import org.testng.annotations.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.trino.SystemSessionProperties.ENABLE_LARGE_DYNAMIC_FILTERS;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
@@ -97,6 +104,56 @@ public class TestMemorySmoke
         assertQueryResult("INSERT INTO test_select SELECT * FROM tpch.tiny.nation", 25L);
 
         assertQueryResult("SELECT count(*) FROM test_select", 75L);
+    }
+
+    @Test
+    public void testCustomMetricsScanFilter()
+    {
+        Map<String, Metric> metrics = collectCustomMetrics("SELECT partkey FROM part WHERE partkey % 1000 > 0");
+        assertEquals(
+                ((Count) metrics.get("rows")).getValue(),
+                2000);
+        assertEquals(
+                ((Count) metrics.get("opened")).getValue(),
+                ((Count) metrics.get("closed")).getValue());
+        assertGreaterThan(
+                ((Count) metrics.get("closed")).getValue(),
+                0L);
+        Histogram positionHistogram = (Histogram) metrics.get("positions");
+        assertEquals(positionHistogram.getSum(), 2000.0);
+    }
+
+    @Test
+    public void testCustomMetricsScanOnly()
+    {
+        Map<String, Metric> metrics = collectCustomMetrics("SELECT partkey FROM part");
+        assertEquals(
+                ((Count) metrics.get("rows")).getValue(),
+                2000);
+        assertEquals(
+                ((Count) metrics.get("opened")).getValue(),
+                ((Count) metrics.get("closed")).getValue());
+        assertGreaterThan(
+                ((Count) metrics.get("closed")).getValue(),
+                0L);
+        Histogram positionHistogram = (Histogram) metrics.get("positions");
+        assertEquals(positionHistogram.getSum(), 2000.0);
+    }
+
+    private Map<String, Metric> collectCustomMetrics(String sql)
+    {
+        DistributedQueryRunner runner = (DistributedQueryRunner) getQueryRunner();
+        ResultWithQueryId<MaterializedResult> result = runner.executeWithQueryId(getSession(), sql);
+        Metrics metrics = Metrics.merge(runner
+                .getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(result.getQueryId())
+                .getQueryStats()
+                .getOperatorSummaries()
+                .stream()
+                .map(s -> s.getCustomMetrics())
+                .collect(Collectors.toList()));
+        return metrics.get();
     }
 
     @Test

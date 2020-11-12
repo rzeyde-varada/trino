@@ -13,6 +13,7 @@
  */
 package io.trino.operator;
 
+import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
@@ -25,6 +26,7 @@ import java.util.Optional;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 
 public class TestOperatorStats
@@ -59,6 +61,7 @@ public class TestOperatorStats
             DataSize.ofBytes(12),
             13,
             533,
+            ImmutableMap.of(),
 
             DataSize.ofBytes(14),
 
@@ -106,6 +109,7 @@ public class TestOperatorStats
             DataSize.ofBytes(12),
             13,
             533,
+            ImmutableMap.of(),
 
             DataSize.ofBytes(14),
 
@@ -132,6 +136,7 @@ public class TestOperatorStats
         JsonCodec<OperatorStats> codec = JsonCodec.jsonCodec(OperatorStats.class);
 
         String json = codec.toJson(EXPECTED);
+        assertFalse(json.contains("customMetrics"));  // empty map is dropped
         OperatorStats actual = codec.fromJson(json);
 
         assertExpectedOperatorStats(actual);
@@ -163,6 +168,7 @@ public class TestOperatorStats
         assertEquals(actual.getOutputPositions(), 13);
 
         assertEquals(actual.getDynamicFilterSplitsProcessed(), 533);
+        assertEquals(actual.getCustomMetrics(), ImmutableMap.of());
 
         assertEquals(actual.getPhysicalWrittenDataSize(), DataSize.ofBytes(14));
 

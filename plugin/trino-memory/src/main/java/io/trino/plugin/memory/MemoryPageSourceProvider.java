@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.memory;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -23,6 +24,9 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedPageSource;
+import io.trino.spi.metrics.Count;
+import io.trino.spi.metrics.Histogram;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.TypeUtils;
@@ -85,10 +89,15 @@ public final class MemoryPageSourceProvider
     private static class DynamicFilteringPageSource
             implements ConnectorPageSource
     {
+        private static final double[] POSITIONS_LIMIT = new double[] {1, 10, 100, 1000, 10000};
+
         private final FixedPageSource delegate;
         private final List<ColumnHandle> columns;
         private final DynamicFilter dynamicFilter;
         private final boolean enableLazyDynamicFiltering;
+        private long rows;
+        private boolean closed;
+        private Histogram.Builder positionHistogram = Histogram.builder(POSITIONS_LIMIT);
 
         private DynamicFilteringPageSource(FixedPageSource delegate, List<ColumnHandle> columns, DynamicFilter dynamicFilter, boolean enableLazyDynamicFiltering)
         {
@@ -131,6 +140,10 @@ public final class MemoryPageSourceProvider
             if (page != null && !predicate.isAll()) {
                 page = applyFilter(page, predicate.transform(columns::indexOf).getDomains().get());
             }
+            if (page != null) {
+                rows += page.getPositionCount();
+                positionHistogram.add(page.getPositionCount());
+            }
             return page;
         }
 
@@ -153,6 +166,17 @@ public final class MemoryPageSourceProvider
         public void close()
         {
             delegate.close();
+            closed = true;
+        }
+
+        @Override
+        public Metrics getMetrics()
+        {
+            return new Metrics(ImmutableMap.of(
+                    "rows", new Count(rows),
+                    "closed", new Count(closed ? 1L : 0L),
+                    "opened", new Count(1L),
+                    "positions", positionHistogram.build()));
         }
     }
 

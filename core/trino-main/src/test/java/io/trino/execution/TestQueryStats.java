@@ -14,6 +14,7 @@
 package io.trino.execution;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.json.JsonCodec;
 import io.airlift.units.DataSize;
@@ -62,6 +63,7 @@ public class TestQueryStats
                     succinctBytes(116L),
                     117L,
                     1833,
+                    ImmutableMap.of(),
                     succinctBytes(118L),
                     new Duration(119, NANOSECONDS),
                     120L,
@@ -101,6 +103,7 @@ public class TestQueryStats
                     succinctBytes(216L),
                     217L,
                     2833,
+                    ImmutableMap.of(),
                     succinctBytes(218L),
                     new Duration(219, NANOSECONDS),
                     220L,
@@ -140,6 +143,7 @@ public class TestQueryStats
                     succinctBytes(316L),
                     317L,
                     3833,
+                    ImmutableMap.of(),
                     succinctBytes(318L),
                     new Duration(319, NANOSECONDS),
                     320L,
