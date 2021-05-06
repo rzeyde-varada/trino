@@ -16,6 +16,7 @@ package io.trino.spi.metrics;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.airlift.stats.TDigest;
 import io.trino.spi.Mergeable;
 
 import java.util.Arrays;
@@ -23,6 +24,7 @@ import java.util.Arrays;
 public class Histogram
         implements Metric, Mergeable<Histogram>
 {
+    TDigest digest;
     // limits must be sorted.
     private final double[] limits;
     // buckets[i] is the number of events with value between limit[i-1] and limits[i], with limits[-1] being "-infinity".
