@@ -147,7 +147,7 @@ public class TestMemoryConnectorTest
         assertQueryResult("SELECT count(*) FROM test_select", 75L);
     }
 
-    @Test
+    @Test(invocationCount = 10000)
     public void testCustomMetricsScanFilter()
     {
         Metrics metrics = collectCustomMetrics("SELECT partkey FROM part WHERE partkey % 1000 > 0");
@@ -156,7 +156,7 @@ public class TestMemoryConnectorTest
         assertThat(((Count) metrics.getMetrics().get("finished")).getTotal()).isGreaterThan(0);
     }
 
-    @Test
+    @Test(invocationCount = 10000)
     public void testCustomMetricsScanOnly()
     {
         Metrics metrics = collectCustomMetrics("SELECT partkey FROM part");
@@ -169,15 +169,20 @@ public class TestMemoryConnectorTest
     {
         DistributedQueryRunner runner = (DistributedQueryRunner) getQueryRunner();
         ResultWithQueryId<MaterializedResult> result = runner.executeWithQueryId(getSession(), sql);
-        return runner
+        List<OperatorStats> summaries = runner
                 .getCoordinator()
                 .getQueryManager()
                 .getFullQueryInfo(result.getQueryId())
                 .getQueryStats()
-                .getOperatorSummaries()
+                .getOperatorSummaries();
+        long inputRows = summaries.stream().filter(s -> s.getOperatorType().contains("Scan")).map(s -> s.getInputPositions()).reduce(0L, (x, y) -> x+y);
+        Metrics metrics = summaries
                 .stream()
                 .map(OperatorStats::getMetrics)
                 .reduce(Metrics.EMPTY, Metrics::mergeWith);
+        System.err.println("inputRows: " + inputRows);
+        System.err.println("metrics: " + metrics.getMetrics());
+        return metrics;
     }
 
     @Test(timeOut = 30_000)
